@@ -44,7 +44,7 @@ use ferrokv::Ferrokv;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open the database (creates ./data/ directory if missing)
-    let db = Ferrokv::open(PathBuf::from("./data/primary.db")).await?;
+    let db = Ferrokv::open(PathBuf::from("./data")).await?;
 
     // 2. Standard Key-Value ops (ACID guaranteed)
     db.set(b"user:101", b"Alice").await?;
