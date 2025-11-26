@@ -118,4 +118,8 @@ pub(crate) mod ttl;
 pub(crate) mod wal;
 
 pub use errors::FerroError;
+use mimalloc::MiMalloc;
 pub use storage::FerroKv;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;

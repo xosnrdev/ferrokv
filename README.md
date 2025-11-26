@@ -74,6 +74,12 @@ Ferrokv avoids complex locking schemes by using **MVCC (Multi-Version Concurrenc
 
 For a deep dive into the design philosophy and file format, strictly read the [WHITEPAPER.md](WHITEPAPER.md).
 
+## Allocator Strategy
+
+We use [Mimalloc](https://github.com/microsoft/mimalloc) as the default allocator.
+
+The standard system allocator often suffers from lock contention when used with the "work-stealing" patterns of the `tokio` runtime. Mimalloc is required to eliminate this contention and guarantee the low-latency performance constraints of this project.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
