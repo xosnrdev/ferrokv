@@ -57,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let visits = db.incr(b"site:visits").await?;
     println!("Visits: {visits}");
 
+    // 5. Delete
+    db.del(b"user:101").await?;
+
     Ok(())
 }
 ```
