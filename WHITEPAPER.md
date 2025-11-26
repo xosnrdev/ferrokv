@@ -91,7 +91,7 @@ The API surface aims for ergonomic simplicity, mirroring the Redis command set.
 ```rust
 /// The Ferrokv Primary Interface
 impl Ferrokv {
-    /// Open or Create a Ferrokv Database at the given path
+    /// Open database at the given directory with default configuration
     pub async fn open(path: PathBuf) -> Result<Self>;
 
     /// O(1) Write with Durability Guarantee
@@ -102,6 +102,9 @@ impl Ferrokv {
 
     /// O(log N) Read
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
+
+    /// O(1) Delete with Tombstone Marking
+    pub async fn del(&self, key: &[u8]) -> Result<bool>;
 
     /// Atomic Increment (Read-Modify-Write)
     pub async fn incr(&self, key: &[u8]) -> Result<i64>;
