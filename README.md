@@ -37,19 +37,19 @@ Ferrokv feels like a Redis client, but the database lives inside your app.
 
 ```rust
 use std::time::Duration;
-use std::path::PathBuf;
 
-use ferrokv::Ferrokv;
+use ferrokv::FerroKv;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Open the database (creates ./data/ directory if missing)
-    let db = Ferrokv::open(PathBuf::from("./data")).await?;
+    // 1. Open the database at the given directory
+    // with default settings (creates ./data/ directory if missing)
+    let db = FerroKv::open("./data").await?;
 
-    // 2. Standard Key-Value ops (ACID guaranteed)
+    // 2. Standard Key-Value ops
     db.set(b"user:101", b"Alice").await?;
 
-    // 3. The "Killer Feature": Async Set with TTL
+    // 3. With TTL
     // The key auto-expires from disk after 60 seconds.
     db.set_ex(b"session:xyz", b"active", Duration::from_secs(60)).await?;
 
@@ -70,12 +70,6 @@ Ferrokv avoids complex locking schemes by using **MVCC (Multi-Version Concurrenc
 - **Storage** relies on an LSM-tree structure (SSTables) designed for prefix compression and fast scanning.
 
 For a deep dive into the design philosophy and file format, strictly read the [WHITEPAPER.md](WHITEPAPER.md).
-
-## Current Status
-
-🚧 **Research & Prototype Phase** 🚧
-
-Ferrokv is currently in active development.
 
 ## License
 
