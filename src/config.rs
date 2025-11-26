@@ -24,7 +24,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Validate configuration values
     fn validate(&self) -> Result<()> {
         if self.memtable_size < MEBI {
             return Err(FerroError::InvalidData("memtable_size must be at least 1MB".into()));

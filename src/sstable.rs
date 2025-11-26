@@ -161,7 +161,7 @@ impl SSTable {
         }))
     }
 
-    /// Point read with O(log N) binary search
+    /// Point read with binary search
     /// Returns (value, version, ttl) for MVCC support
     pub async fn get(&self, key: &[u8]) -> Result<ReadResult> {
         // Load Index Block
@@ -464,7 +464,7 @@ impl SSTable {
                 if cursor + 8 > data_buf.len() {
                     break;
                 }
-                cursor += 8; // Skip version
+                cursor += 8;
 
                 // Parse TTL if present
                 if flags & FLAG_HAS_TTL != 0 {
@@ -504,7 +504,7 @@ impl SSTable {
     }
 }
 
-/// Iterator for sequential `SSTable` record scanning (used in compaction)
+/// Iterator for sequential `SSTable` record scanning for compaction
 pub struct SSTIterator {
     mmap: Mmap,
     data_end: usize,
@@ -616,7 +616,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
 
-    /// Test Read Path: `SSTable` point read
     #[tokio::test]
     async fn test_sstable_get() {
         let db_dir = tempdir().unwrap().keep();
@@ -638,7 +637,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
 
-    /// Test range check for read optimization
     #[tokio::test]
     async fn test_sstable_key_range() {
         let db_dir = tempdir().unwrap().keep();

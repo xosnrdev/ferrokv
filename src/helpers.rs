@@ -4,7 +4,7 @@ use std::time::Instant;
 pub const KIBI: usize = 1024;
 pub const MEBI: usize = KIBI * KIBI;
 
-/// Data Block size (4KB aligns with OS page cache)
+/// Data Block size as per OS page size (4KB)
 pub const BLOCK_SIZE: usize = 4 * KIBI;
 
 /// Magic number for `SSTable` footer validation

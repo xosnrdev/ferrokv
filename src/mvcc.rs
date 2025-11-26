@@ -5,12 +5,13 @@ pub struct VersionCounter {
     counter: AtomicU64,
 }
 
-impl VersionCounter {
-    /// Create new version counter starting at version 1
-    pub fn new() -> Self {
+impl Default for VersionCounter {
+    fn default() -> Self {
         Self { counter: AtomicU64::new(1) }
     }
+}
 
+impl VersionCounter {
     /// Get next version number (monotonically increasing)
     pub fn next_version(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::SeqCst)
@@ -19,11 +20,5 @@ impl VersionCounter {
     /// Get current version without incrementing
     pub fn current_version(&self) -> u64 {
         self.counter.load(Ordering::SeqCst)
-    }
-}
-
-impl Default for VersionCounter {
-    fn default() -> Self {
-        Self::new()
     }
 }

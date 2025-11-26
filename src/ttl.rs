@@ -42,7 +42,7 @@ impl ExpiryHeap {
         self.notifier.notify_one();
     }
 
-    /// Remove expiry (called when key updated/deleted before expiry)
+    /// Remove expiry (to be called when key updated/deleted before expiry)
     #[cfg(test)]
     pub async fn cancel(&self, key: &[u8]) {
         let mut heap = self.heap.write().await;
@@ -98,8 +98,6 @@ mod tests {
         assert_eq!(next, Some((expire_at, key)));
     }
 
-    /// Test Cold data proactive cleanup
-    /// Key deleted WITHOUT access (not lazy eviction)
     #[tokio::test]
     async fn test_proactive_cold_data_cleanup() {
         let heap = ExpiryHeap::default();
@@ -118,8 +116,6 @@ mod tests {
         assert_eq!(popped, Some(key));
     }
 
-    /// Test Non-blocking cleanup
-    /// Notifier wakes background task without blocking
     #[tokio::test]
     async fn test_non_blocking_notification() {
         let heap: Arc<ExpiryHeap> = Arc::new(ExpiryHeap::default());
@@ -146,8 +142,6 @@ mod tests {
         assert!(notified, "Background task must receive notification");
     }
 
-    /// Test Cancellation on update/delete
-    /// prevent stale expirations
     #[tokio::test]
     async fn test_expiry_cancellation() {
         let heap = ExpiryHeap::default();
@@ -166,8 +160,6 @@ mod tests {
         assert_eq!(key.as_ref(), b"other_key");
     }
 
-    /// Test Min-heap ordering
-    /// Earliest expiry always at top
     #[tokio::test]
     async fn test_min_heap_ordering() {
         let heap = ExpiryHeap::default();
@@ -192,22 +184,16 @@ mod tests {
         assert_eq!(k3.unwrap().as_ref(), b"key3");
     }
 
-    /// Test Three-tier strategy integration
-    /// complements lazy + compaction
     #[tokio::test]
     async fn test_three_tier_strategy_integration() {
         let heap = ExpiryHeap::default();
         let now = 1000;
 
-        // Strategy #1 (Lazy): Returns None on GET if expired
-        // Strategy #2 (Compaction): Drops expired during merge
-        // Strategy #3 (Proactive): Deletes cold data without access
-
         // Simulate cold key (never accessed)
         let cold_key: Arc<[u8]> = b"cold_key".to_vec().into();
         heap.schedule(cold_key.clone(), now + 100).await;
 
-        // Strategy #3 should delete proactively
+        // should delete proactively
         let deleted: Option<Arc<[u8]>> = heap.pop_expired(now + 101).await;
         assert_eq!(deleted, Some(cold_key));
 

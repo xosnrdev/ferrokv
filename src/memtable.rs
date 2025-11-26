@@ -50,14 +50,15 @@ impl Memtable {
     pub fn insert(&self, key: &[u8], value: &[u8], ttl: Option<u64>) -> u64 {
         let version = self.version_counter.next_version();
 
-        let key_arc: Arc<[u8]> = key.to_vec().into();
-        let value_arc: Arc<[u8]> = value.to_vec().into();
+        let key: Arc<[u8]> = key.to_vec().into();
+        let value: Arc<[u8]> = value.to_vec().into();
 
-        let entry = MemtableEntry { value: value_arc, version, ttl, is_tombstone: false };
+        let entry = MemtableEntry { value, version, ttl, is_tombstone: false };
 
-        let entry_size = key_arc.len() + entry.value.len() + 16; // key + value + metadata
+        // key + value + metadata
+        let entry_size = key.len() + entry.value.len() + 16;
 
-        self.data.insert(key_arc, entry);
+        self.data.insert(key, entry);
 
         self.size.fetch_add(entry_size, Ordering::Relaxed);
 
@@ -131,14 +132,13 @@ impl Memtable {
         })
     }
 
-    /// Clear all entries (called after successful `SSTable` flush)
+    /// Clear all entries (to be called after successful `SSTable` flush)
     pub fn clear(&self) {
         self.data.clear();
         self.size.store(0, Ordering::Relaxed);
-        // Note: version_counter NOT reset (monotonically increasing)
     }
 
-    /// Get number of entries (for testing/monitoring)
+    /// Get number of entries
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.data.len()
@@ -155,14 +155,14 @@ impl Memtable {
     pub fn insert_tombstone(&self, key: &[u8]) -> u64 {
         let version = self.version_counter.next_version();
 
-        let key_arc: Arc<[u8]> = key.to_vec().into();
+        let key: Arc<[u8]> = key.to_vec().into();
 
         let entry =
             MemtableEntry { value: Arc::from(Vec::new()), version, ttl: None, is_tombstone: true };
 
-        let entry_size = key_arc.len() + 16;
+        let entry_size = key.len() + 16;
 
-        self.data.insert(key_arc, entry);
+        self.data.insert(key, entry);
         self.size.fetch_add(entry_size, Ordering::Relaxed);
 
         version
@@ -209,8 +209,6 @@ mod tests {
         assert_eq!(val_filtered, LookupResult::NotFound);
     }
 
-    /// Test flush trigger
-    /// Verifies memory threshold detection
     #[test]
     fn test_flush_threshold() {
         let memtable = Memtable::default();
@@ -227,7 +225,6 @@ mod tests {
         assert!(memtable.should_flush(flush_threshold));
     }
 
-    /// Test clear operation (post-flush cleanup)
     #[test]
     fn test_clear_after_flush() {
         let memtable = Memtable::default();
@@ -249,7 +246,6 @@ mod tests {
         assert_eq!(memtable.current_version(), version_before_clear);
     }
 
-    /// Test iteration order (for `SSTable` flush)
     #[test]
     fn test_sorted_iteration() {
         let memtable = Memtable::default();

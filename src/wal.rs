@@ -230,7 +230,7 @@ impl Wal {
         Ok(entries)
     }
 
-    /// Truncate WAL (called after Memtable flush to `SSTable`)
+    /// Truncate WAL (to be called after Memtable flush to `SSTable`)
     pub async fn truncate(&mut self) -> Result<()> {
         // Close current file
         drop(std::mem::replace(

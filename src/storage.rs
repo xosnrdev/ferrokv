@@ -41,12 +41,12 @@ impl FerroKv {
         Self::open_with_config(path.into(), Config::default()).await
     }
 
-    /// Create a new builder for custom configuration
+    /// Builder for custom configuration
     pub fn builder<P: Into<PathBuf>>(path: P) -> FerroKvBuilder {
         FerroKvBuilder::default().path(path.into())
     }
 
-    /// Open database with custom configuration
+    /// Open database with configuration
     pub(crate) async fn open_with_config(path: PathBuf, config: Config) -> Result<Self> {
         tokio::fs::create_dir_all(&path).await?;
         let wal_path = path.join("data.wal");
@@ -81,8 +81,7 @@ impl FerroKv {
         let mut sstables = Vec::new();
         let mut max_sst_id = 0;
 
-        if let Ok(entries) = tokio::fs::read_dir(&path).await {
-            let mut entries = entries;
+        if let Ok(mut entries) = tokio::fs::read_dir(&path).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let entry_path = entry.path();
                 if entry_path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext == "sst") {
@@ -118,16 +117,16 @@ impl FerroKv {
         };
 
         // Spawn background expiry cleanup task
-        let memtable_clone = Arc::clone(&memtable);
-        let expiry_heap_clone = Arc::clone(&expiry_heap);
+        let memtable = Arc::clone(&memtable);
+        let expiry_heap = Arc::clone(&expiry_heap);
         tokio::spawn(async move {
-            Self::run_expiry_cleanup(memtable_clone, expiry_heap_clone).await;
+            Self::run_expiry_cleanup(memtable, expiry_heap).await;
         });
 
         Ok(db)
     }
 
-    /// Write with durability guarantee
+    /// Insert or update a key with the given value
     pub async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut wal = self.wal.lock().await;
         wal.append(key, value, None).await?;
@@ -143,7 +142,7 @@ impl FerroKv {
         Ok(())
     }
 
-    /// Write with TTL expiration
+    /// Insert or update a key with the given value and a TTL expiration
     pub async fn set_ex(&self, key: &[u8], value: &[u8], ttl: Duration) -> Result<()> {
         let expire_at = get_now() + ttl.as_secs();
 
@@ -155,8 +154,8 @@ impl FerroKv {
         self.memtable.insert(key, value, Some(expire_at));
 
         // Schedule proactive expiry cleanup
-        let key_arc: Arc<[u8]> = key.to_vec().into();
-        self.expiry_heap.schedule(key_arc, expire_at).await;
+        let key: Arc<[u8]> = key.to_vec().into();
+        self.expiry_heap.schedule(key, expire_at).await;
 
         if self.memtable.should_flush(self.config.memtable_size) {
             self.flush_memtable().await?;
@@ -165,7 +164,7 @@ impl FerroKv {
         Ok(())
     }
 
-    /// Read with cascade: Memtable -> `SSTables`
+    /// Get the value associated with `key`
     pub async fn get(&self, key: &[u8]) -> Result<Option<Arc<[u8]>>> {
         let snapshot = self.memtable.current_version();
         match self.memtable.get(key, snapshot) {
@@ -188,8 +187,8 @@ impl FerroKv {
         Ok(None)
     }
 
-    /// Delete a key
-    /// Returns true if key existed, false if not found
+    /// Delete the `key`
+    /// Returns true if key existed, otherwise false
     pub async fn del(&self, key: &[u8]) -> Result<bool> {
         let existed = self.get(key).await?.is_some();
 
@@ -210,7 +209,7 @@ impl FerroKv {
         Ok(existed)
     }
 
-    /// Atomic increment
+    /// Increment the `key` atomically
     pub async fn incr(&self, key: &[u8]) -> Result<i64> {
         // Acquire lock to serialize Read-Modify-Write operations
         let _lock = self.incr_lock.lock().await;
@@ -277,7 +276,7 @@ impl FerroKv {
         }
     }
 
-    /// Flush Memtable to `SSTable` when 64MB threshold reached
+    /// Flush Memtable to `SSTable` when config threshold reached
     pub(crate) async fn flush_memtable(&self) -> Result<()> {
         let sst_id = self.next_sst_id.fetch_add(1, Ordering::SeqCst);
 
@@ -308,19 +307,19 @@ impl FerroKv {
 
     /// Trigger background compaction
     fn maybe_trigger_compaction(&self) {
-        let sstables_clone = Arc::clone(&self.sstables);
+        let sstables = Arc::clone(&self.sstables);
         let db_dir = self.db_dir.clone();
         let next_id = Arc::clone(&self.next_sst_id);
         let config = Arc::clone(&self.config);
 
         tokio::spawn(async move {
-            if let Err(err) = Self::run_compaction(sstables_clone, db_dir, next_id, config).await {
+            if let Err(err) = Self::run_compaction(sstables, db_dir, next_id, config).await {
                 eprintln!("Compaction failed: {err}");
             }
         });
     }
 
-    /// Background compaction: merge L0 `SSTables` to L1
+    /// Background compaction to merge L0 `SSTables` to L1
     async fn run_compaction(
         sstables: Arc<RwLock<Vec<Arc<SSTable>>>>,
         db_dir: PathBuf,
@@ -430,11 +429,11 @@ mod tests {
         let mut handles = Vec::new();
 
         for i in 0..10 {
-            let db_clone = Arc::clone(&db);
+            let db = Arc::clone(&db);
             handles.push(tokio::spawn(async move {
                 let key = format!("key{i}");
                 let value = format!("value{i}");
-                db_clone.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+                db.set(key.as_bytes(), value.as_bytes()).await.unwrap();
             }));
         }
 
@@ -665,11 +664,11 @@ mod tests {
         // Spawn concurrent readers during compaction
         let mut handles = Vec::new();
         for _ in 0..10 {
-            let db_clone = Arc::clone(&db);
+            let db = Arc::clone(&db);
             handles.push(tokio::spawn(async move {
                 for i in 0..50 {
                     let key = format!("key_{i:03}");
-                    let result = db_clone.get(key.as_bytes()).await.unwrap();
+                    let result = db.get(key.as_bytes()).await.unwrap();
                     assert_eq!(result.as_deref(), Some(&b"value"[..]));
                 }
             }));
@@ -836,10 +835,10 @@ mod tests {
         // Spawn 10 concurrent incrementers
         let mut handles = Vec::new();
         for _ in 0..10 {
-            let db_clone = Arc::clone(&db);
+            let db = Arc::clone(&db);
             handles.push(tokio::spawn(async move {
                 for _ in 0..10 {
-                    db_clone.incr(b"shared_counter").await.unwrap();
+                    db.incr(b"shared_counter").await.unwrap();
                 }
             }));
         }
