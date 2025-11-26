@@ -531,7 +531,7 @@ impl SSTIterator {
         Ok(Self { mmap, data_end, cursor: 0 })
     }
 
-    /// Get next record from Data Blocks (not `std::iter::Iterator` to avoid Result<Option<T>>)
+    /// Get next record from Data Blocks (not `std::iter::Iterator` to avoid `Option<Result<Option<T>>>`)
     pub fn next_record(&mut self) -> Result<Option<Record>> {
         if self.cursor >= self.data_end {
             return Ok(None);
