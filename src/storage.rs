@@ -1,9 +1,12 @@
+use std::ops::RangeBounds;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
+use tokio_stream::Stream;
 
 use crate::compaction::merge_sstables;
 use crate::config::{Config, FerroKvBuilder};
@@ -37,19 +40,19 @@ impl FerroKv {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn open<P: Into<PathBuf>>(path: P) -> Result<Self> {
+    pub async fn open(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_with_config(path.into(), Config::default()).await
     }
 
     /// Builder for custom configuration
-    pub fn builder<P: Into<PathBuf>>(path: P) -> FerroKvBuilder {
+    pub fn builder(path: impl Into<PathBuf>) -> FerroKvBuilder {
         FerroKvBuilder::default().path(path.into())
     }
 
     /// Open database with configuration
     pub(crate) async fn open_with_config(path: PathBuf, config: Config) -> Result<Self> {
         tokio::fs::create_dir_all(&path).await?;
-        let wal_path = path.join("data.wal");
+        let wal_path = path.join("wal.log");
 
         let recovered_entries = Wal::recover(&wal_path).await?;
         let memtable = Arc::new(Memtable::default());
@@ -207,6 +210,15 @@ impl FerroKv {
         }
 
         Ok(existed)
+    }
+
+    /// Scan key-value pairs in the given range
+    /// Returns an async stream of (key, value) pairs
+    pub async fn scan(
+        &self,
+        _range: impl RangeBounds<&[u8]> + Send + 'static,
+    ) -> Result<Pin<Box<dyn Stream<Item = (Arc<[u8]>, Arc<[u8]>)> + Send>>> {
+        unimplemented!("Range scan is not yet implemented");
     }
 
     /// Increment the `key` atomically
