@@ -30,6 +30,12 @@
 //!     // Atomic increment
 //!     let count = db.incr(b"visits").await?;
 //!
+//!     // Scan
+//!     let results = db.scan(..).await?;
+//!     for (key, value) in &results {
+//!         println!("{} = {}", String::from_utf8_lossy(key), String::from_utf8_lossy(value));
+//!     }
+//!
 //!     // Delete
 //!     db.del(b"user:100").await?;
 //!
@@ -104,8 +110,16 @@
 //! Read the [WHITEPAPER](https://github.com/xosnrdev/ferrokv/blob/master/WHITEPAPER.md)
 //! for implementation details and design decisions.
 
-#![allow(clippy::cast_possible_truncation, clippy::missing_errors_doc)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::missing_errors_doc,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
 
+pub(crate) mod bloom;
 pub(crate) mod compaction;
 pub(crate) mod config;
 pub(crate) mod errors;

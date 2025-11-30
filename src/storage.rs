@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::ops::{Bound, RangeBounds};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +15,15 @@ use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
 use crate::ttl::ExpiryHeap;
 use crate::wal::Wal;
+
+/// Type alias for merged record: (value, version, ttl, `is_tombstone`)
+type MergedRecord = (Arc<[u8]>, u64, Option<u64>, bool);
+
+/// Type alias for scan result pair
+type ScanPair = (Arc<[u8]>, Arc<[u8]>);
+
+/// Type alias for scan range bounds
+pub type ScanBounds = (Bound<Arc<[u8]>>, Bound<Arc<[u8]>>);
 
 pub struct FerroKv {
     wal: Mutex<Wal>,
@@ -37,19 +48,19 @@ impl FerroKv {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn open<P: Into<PathBuf>>(path: P) -> Result<Self> {
+    pub async fn open(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_with_config(path.into(), Config::default()).await
     }
 
     /// Builder for custom configuration
-    pub fn builder<P: Into<PathBuf>>(path: P) -> FerroKvBuilder {
+    pub fn builder(path: impl Into<PathBuf>) -> FerroKvBuilder {
         FerroKvBuilder::default().path(path.into())
     }
 
     /// Open database with configuration
     pub(crate) async fn open_with_config(path: PathBuf, config: Config) -> Result<Self> {
         tokio::fs::create_dir_all(&path).await?;
-        let wal_path = path.join("data.wal");
+        let wal_path = path.join("wal.log");
 
         let recovered_entries = Wal::recover(&wal_path).await?;
         let memtable = Arc::new(Memtable::default());
@@ -207,6 +218,83 @@ impl FerroKv {
         }
 
         Ok(existed)
+    }
+
+    /// Scan key-value pairs in the given range
+    /// Returns a Vec of (key, value) pairs
+    pub async fn scan(&self, range: impl RangeBounds<&[u8]>) -> Result<Vec<ScanPair>> {
+        let bounds = Self::to_arc_bounds(&range);
+        let snapshot_version = self.memtable.current_version();
+        let now = get_now();
+
+        let mut merged: BTreeMap<Arc<[u8]>, MergedRecord> = BTreeMap::new();
+
+        for record in self.memtable.range(&bounds, snapshot_version) {
+            match merged.get(&record.key) {
+                Some((_, existing_version, ..)) if *existing_version >= record.version => {}
+                _ => {
+                    merged.insert(
+                        record.key,
+                        (record.value, record.version, record.ttl, record.is_tombstone),
+                    );
+                }
+            }
+        }
+
+        let sstables = self.sstables.read().await;
+        for sst in sstables.iter() {
+            if sst.overlaps_range(&bounds) {
+                for record in sst.scan_range(&bounds, now).await? {
+                    if record.version > snapshot_version {
+                        continue;
+                    }
+                    match merged.get(&record.key) {
+                        Some((_, existing_version, ..)) if *existing_version >= record.version => {}
+                        _ => {
+                            merged.insert(
+                                record.key,
+                                (record.value, record.version, record.ttl, record.is_tombstone),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        drop(sstables);
+
+        // Filter tombstones
+        Ok(merged
+            .into_iter()
+            .filter_map(|(key, (value, _, ttl, is_tombstone))| {
+                if is_tombstone {
+                    return None;
+                }
+
+                if let Some(expire_at) = ttl
+                    && now >= expire_at
+                {
+                    return None;
+                }
+                Some((key, value))
+            })
+            .collect())
+    }
+
+    /// Convert range bounds to `Arc<[u8]>`
+    fn to_arc_bounds<'a>(range: &impl RangeBounds<&'a [u8]>) -> ScanBounds {
+        let start = match range.start_bound() {
+            Bound::Included(k) => Bound::Included(Arc::from(*k)),
+            Bound::Excluded(k) => Bound::Excluded(Arc::from(*k)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(k) => Bound::Included(Arc::from(*k)),
+            Bound::Excluded(k) => Bound::Excluded(Arc::from(*k)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        (start, end)
     }
 
     /// Increment the `key` atomically
@@ -1007,6 +1095,180 @@ mod tests {
 
         db.set(b"key1", b"value2").await.unwrap();
         assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value2"[..]));
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_range() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        // Insert keys in sorted order
+        db.set(b"key_a", b"value_a").await.unwrap();
+        db.set(b"key_b", b"value_b").await.unwrap();
+        db.set(b"key_c", b"value_c").await.unwrap();
+        db.set(b"key_d", b"value_d").await.unwrap();
+        db.set(b"key_e", b"value_e").await.unwrap();
+
+        // Scan range [key_b, key_d]
+        let results = db.scan(&b"key_b"[..]..=&b"key_d"[..]).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0.as_ref(), b"key_b");
+        assert_eq!(results[1].0.as_ref(), b"key_c");
+        assert_eq!(results[2].0.as_ref(), b"key_d");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_unbounded() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        db.set(b"a", b"1").await.unwrap();
+        db.set(b"b", b"2").await.unwrap();
+        db.set(b"c", b"3").await.unwrap();
+
+        // Scan all keys (unbounded range)
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0.as_ref(), b"a");
+        assert_eq!(results[1].0.as_ref(), b"b");
+        assert_eq!(results[2].0.as_ref(), b"c");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_empty_range() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        db.set(b"key_a", b"value_a").await.unwrap();
+        db.set(b"key_z", b"value_z").await.unwrap();
+
+        // Scan range that has no keys
+        let results = db.scan(&b"key_m"[..]..&b"key_n"[..]).await.unwrap();
+
+        assert_eq!(results.len(), 0);
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_across_memtable_and_sstable() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        // Write and flush to SSTable
+        db.set(b"key_1", b"sstable_value").await.unwrap();
+        db.set(b"key_2", b"sstable_value").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        // Write to memtable (not flushed)
+        db.set(b"key_3", b"memtable_value").await.unwrap();
+        db.set(b"key_4", b"memtable_value").await.unwrap();
+
+        // Scan should include both SSTable and Memtable data
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].0.as_ref(), b"key_1");
+        assert_eq!(results[1].0.as_ref(), b"key_2");
+        assert_eq!(results[2].0.as_ref(), b"key_3");
+        assert_eq!(results[3].0.as_ref(), b"key_4");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_tombstone_filtering() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        db.set(b"key_a", b"value_a").await.unwrap();
+        db.set(b"key_b", b"value_b").await.unwrap();
+        db.set(b"key_c", b"value_c").await.unwrap();
+
+        // Delete key_b
+        db.del(b"key_b").await.unwrap();
+
+        // Scan should not include deleted key
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.as_ref(), b"key_a");
+        assert_eq!(results[1].0.as_ref(), b"key_c");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_ttl_expiration() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        db.set(b"key_a", b"value_a").await.unwrap();
+        db.set_ex(b"key_b", b"value_b", Duration::from_millis(100)).await.unwrap();
+        db.set(b"key_c", b"value_c").await.unwrap();
+
+        // Wait for TTL expiration
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Scan should not include expired key
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.as_ref(), b"key_a");
+        assert_eq!(results[1].0.as_ref(), b"key_c");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_deduplication() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        // Write same key multiple times
+        db.set(b"key_a", b"v1").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        db.set(b"key_a", b"v2").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        db.set(b"key_a", b"v3").await.unwrap();
+
+        // Scan should return only the latest value
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.as_ref(), b"key_a");
+        assert_eq!(results[0].1.as_ref(), b"v3");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(db_dir.clone()).await.unwrap();
+
+        // Insert keys with different prefixes
+        db.set(b"user:100", b"alice").await.unwrap();
+        db.set(b"user:200", b"bob").await.unwrap();
+        db.set(b"user:300", b"charlie").await.unwrap();
+        db.set(b"session:100", b"active").await.unwrap();
+        db.set(b"session:200", b"expired").await.unwrap();
+
+        // Scan only user: prefix
+        let results = db.scan(&b"user:"[..]..&b"user:\xff"[..]).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|(k, _)| k.starts_with(b"user:")));
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }

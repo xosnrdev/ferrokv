@@ -1,5 +1,4 @@
-use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const KIBI: usize = 1024;
 pub const MEBI: usize = KIBI * KIBI;
@@ -10,7 +9,9 @@ pub const BLOCK_SIZE: usize = 4 * KIBI;
 /// Magic number for `SSTable` footer validation
 pub const FOOTER_MAGIC: u32 = 0xFE77_0557;
 
+/// Footer size: `filter_offset(8)` + `index_offset(8)` + magic(4)
+pub const FOOTER_SIZE: usize = 20;
+
 pub fn get_now() -> u64 {
-    static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
-    START_TIME.elapsed().as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }

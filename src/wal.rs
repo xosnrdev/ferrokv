@@ -179,7 +179,7 @@ impl Wal {
         let path = path.to_path_buf();
 
         // mmap operations are blocking, we delegate them to blocking thread pool to maintain non-blocking guarantee
-        let entries = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let file_std = match std::fs::File::open(&path) {
                 Ok(f) => f,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -225,9 +225,7 @@ impl Wal {
         .await
         .map_err(|err| {
             FerroError::Io(std::io::Error::other(format!("WAL recovery task failed: {err}")))
-        })??;
-
-        Ok(entries)
+        })?
     }
 
     /// Truncate WAL (to be called after Memtable flush to `SSTable`)

@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5,6 +6,7 @@ use crossbeam_skiplist::SkipMap;
 
 use crate::helpers::get_now;
 use crate::mvcc::VersionCounter;
+use crate::storage::ScanBounds;
 
 /// Result of a memtable lookup operation
 #[derive(Debug, PartialEq, Eq)]
@@ -130,6 +132,41 @@ impl Memtable {
                 is_tombstone: val.is_tombstone,
             }
         })
+    }
+
+    /// Iterate over entries in a key range with MVCC filtering
+    /// Returns records visible at the given snapshot version
+    pub fn range(&self, range: &ScanBounds, snapshot_version: u64) -> Vec<MemtableRecord> {
+        let start_bound = match &range.0 {
+            Bound::Included(k) => Bound::Included(Arc::clone(k)),
+            Bound::Excluded(k) => Bound::Excluded(Arc::clone(k)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_bound = match &range.1 {
+            Bound::Included(k) => Bound::Included(Arc::clone(k)),
+            Bound::Excluded(k) => Bound::Excluded(Arc::clone(k)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        self.data
+            .range((start_bound, end_bound))
+            .filter_map(|entry| {
+                let val = entry.value();
+
+                // Skip if version is newer than snapshot
+                if val.version > snapshot_version {
+                    return None;
+                }
+
+                Some(MemtableRecord {
+                    key: Arc::clone(entry.key()),
+                    value: Arc::clone(&val.value),
+                    version: val.version,
+                    ttl: val.ttl,
+                    is_tombstone: val.is_tombstone,
+                })
+            })
+            .collect()
     }
 
     /// Clear all entries (to be called after successful `SSTable` flush)

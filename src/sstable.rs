@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,9 +6,11 @@ use memmap2::Mmap;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::bloom::BloomFilter;
 use crate::errors::{FerroError, Result};
-use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, get_now};
+use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, FOOTER_SIZE, get_now};
 use crate::memtable::Memtable;
+use crate::storage::ScanBounds;
 
 /// Record flags
 pub const FLAG_HAS_TTL: u8 = 0x01;
@@ -38,6 +41,7 @@ pub struct SSTable {
     path: PathBuf,
     level: u8,
     id: u64,
+    filter_offset: u64,
     index_offset: u64,
     first_key: Arc<[u8]>,
     last_key: Arc<[u8]>,
@@ -58,12 +62,19 @@ impl SSTable {
         let mut first_key_opt = None;
         let mut last_key = Arc::from(Vec::new());
 
+        // Collect all keys for Bloom filter
+        let mut all_keys = Vec::new();
+
         // Write Data Blocks
         for record in memtable.iter() {
             let key = &record.key;
             let value = &record.value;
             let version = record.version;
             let ttl = record.ttl;
+
+            // Collect key for Bloom filter
+            all_keys.push(Arc::clone(key));
+
             // Track first/last keys for metadata
             if first_key_opt.is_none() {
                 first_key_opt = Some(Arc::clone(&record.key));
@@ -118,9 +129,18 @@ impl SSTable {
             current_offset += block_buffer.len() as u64;
         }
 
-        let index_offset = current_offset;
+        // Write Filter Block
+        let filter_offset = current_offset;
+        let mut bloom_filter = BloomFilter::new(all_keys.len(), 0.01);
+        for key in &all_keys {
+            bloom_filter.insert(key);
+        }
+        let filter_data = bloom_filter.serialize();
+        file.write_all(&filter_data).await?;
+        current_offset += filter_data.len() as u64;
 
         // Write Index Block
+        let index_offset = current_offset;
         let index_count = index_entries.len() as u32;
         file.write_all(&index_count.to_le_bytes()).await?;
         current_offset += 4;
@@ -133,10 +153,11 @@ impl SSTable {
             current_offset += 4 + u64::from(key_len) + 8;
         }
 
-        // Write Footer
+        // Write Footer: filter_offset(8) + index_offset(8) + magic(4) = 20 bytes
+        file.write_all(&filter_offset.to_le_bytes()).await?;
         file.write_all(&index_offset.to_le_bytes()).await?;
         file.write_all(&FOOTER_MAGIC.to_le_bytes()).await?;
-        current_offset += 12;
+        current_offset += FOOTER_SIZE as u64;
 
         // ACID: Durability guarantee
         file.sync_all().await?;
@@ -154,6 +175,7 @@ impl SSTable {
             path,
             level,
             id,
+            filter_offset,
             index_offset,
             first_key,
             last_key,
@@ -164,6 +186,10 @@ impl SSTable {
     /// Point read with binary search
     /// Returns (value, version, ttl) for MVCC support
     pub async fn get(&self, key: &[u8]) -> Result<ReadResult> {
+        if !self.check_bloom_filter(key).await? {
+            return Ok(None);
+        }
+
         // Load Index Block
         let index_entries = self.load_index().await?;
 
@@ -183,14 +209,14 @@ impl SSTable {
         let next_offset = if block_idx + 1 < index_entries.len() {
             index_entries[block_idx + 1].offset
         } else {
-            self.index_offset
+            self.filter_offset
         };
 
         let path = self.path.clone();
         let key = key.to_vec();
 
         // mmap operations are blocking, we delegate them to blocking thread pool to maintain non-blocking guarantee
-        let result = tokio::task::spawn_blocking(move || -> Result<ReadResult> {
+        tokio::task::spawn_blocking(move || {
             let file_std = std::fs::File::open(&path)?;
             let mmap = unsafe { Mmap::map(&file_std)? };
 
@@ -265,28 +291,53 @@ impl SSTable {
         .await
         .map_err(|err| {
             FerroError::Io(std::io::Error::other(format!("SSTable read task failed: {err}")))
-        })??;
+        })?
+    }
 
-        Ok(result)
+    /// Check if key may exist in this `SSTable` using Bloom filter
+    async fn check_bloom_filter(&self, key: &[u8]) -> Result<bool> {
+        let path = self.path.clone();
+        let filter_offset = self.filter_offset;
+        let index_offset = self.index_offset;
+        let key = key.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let file_std = std::fs::File::open(&path)?;
+            let mmap = unsafe { Mmap::map(&file_std)? };
+
+            // Filter Block is between filter_offset and index_offset
+            let filter_start = filter_offset as usize;
+            let filter_end = index_offset as usize;
+            let filter_data = &mmap[filter_start..filter_end];
+
+            let bloom = BloomFilter::deserialize(filter_data)?;
+            Ok(bloom.may_contain(&key))
+        })
+        .await
+        .map_err(|err| {
+            FerroError::Io(std::io::Error::other(format!("Bloom filter check failed: {err}")))
+        })?
     }
 
     /// Load Index Block into memory
     async fn load_index(&self) -> Result<Vec<IndexEntry>> {
         let path = self.path.clone();
         let size = self.size;
+        let filter_offset = self.filter_offset;
         let index_offset = self.index_offset;
 
         // mmap operations are blocking, we delegate them to blocking thread pool to maintain non-blocking guarantee
-        let index_entries = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let file_std = std::fs::File::open(&path)?;
             let mmap = unsafe { Mmap::map(&file_std)? };
 
-            // Read Footer (last 12 bytes)
-            let footer_start = (size - 12) as usize;
-            let footer = &mmap[footer_start..footer_start + 12];
+            // Read Footer (last 20 bytes): filter_offset(8) + index_offset(8) + magic(4)
+            let footer_start = (size - FOOTER_SIZE as u64) as usize;
+            let footer = &mmap[footer_start..footer_start + FOOTER_SIZE];
 
-            let stored_index_offset = u64::from_le_bytes(footer[0..8].try_into()?);
-            let magic = u32::from_le_bytes(footer[8..12].try_into()?);
+            let stored_filter_offset = u64::from_le_bytes(footer[0..8].try_into()?);
+            let stored_index_offset = u64::from_le_bytes(footer[8..16].try_into()?);
+            let magic = u32::from_le_bytes(footer[16..20].try_into()?);
 
             // ACID Corruption detection
             if magic != FOOTER_MAGIC {
@@ -298,13 +349,17 @@ impl SSTable {
                 ));
             }
 
+            if stored_filter_offset != filter_offset {
+                return Err(FerroError::Corruption("Filter offset mismatch in Footer".into()));
+            }
+
             if stored_index_offset != index_offset {
                 return Err(FerroError::Corruption("Index offset mismatch in Footer".into()));
             }
 
             // Read Index Block
             let index_start = index_offset as usize;
-            let index_end = (size - 12) as usize;
+            let index_end = (size - FOOTER_SIZE as u64) as usize;
             let index_buf = &mmap[index_start..index_end];
 
             let mut cursor = 0;
@@ -328,9 +383,7 @@ impl SSTable {
             Ok(entries)
         }).await.map_err(|err| FerroError::Io(std::io::Error::other(
             format!("Index load task failed: {err}")
-        )))??;
-
-        Ok(index_entries)
+        )))?
     }
 
     /// Get `SSTable` path
@@ -353,17 +406,165 @@ impl SSTable {
         key >= self.first_key.as_ref() && key <= self.last_key.as_ref()
     }
 
+    /// Check if this `SSTable` might contain keys in the given range
+    pub fn overlaps_range(&self, range: &ScanBounds) -> bool {
+        // Check if SSTable's [first_key, last_key] overlaps with the query range
+        let range_start_before_sst_end = match &range.0 {
+            Bound::Included(start) => start.as_ref() <= self.last_key.as_ref(),
+            Bound::Excluded(start) => start.as_ref() < self.last_key.as_ref(),
+            Bound::Unbounded => true,
+        };
+
+        let range_end_after_sst_start = match &range.1 {
+            Bound::Included(end) => end.as_ref() >= self.first_key.as_ref(),
+            Bound::Excluded(end) => end.as_ref() > self.first_key.as_ref(),
+            Bound::Unbounded => true,
+        };
+
+        range_start_before_sst_end && range_end_after_sst_start
+    }
+
+    /// Scan records in the given key range
+    pub async fn scan_range(&self, range: &ScanBounds, now: u64) -> Result<Vec<Record>> {
+        let path = self.path.clone();
+        let filter_offset = self.filter_offset;
+        let range_start = range.0.clone();
+        let range_end = range.1.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let file_std = std::fs::File::open(&path)?;
+            let mmap = unsafe { Mmap::map(&file_std)? };
+
+            let data_end = filter_offset as usize;
+            let mut records = Vec::new();
+            let mut cursor = 0;
+
+            while cursor < data_end {
+                // Parse record
+                if cursor + 1 > data_end {
+                    break;
+                }
+
+                let flags = mmap[cursor];
+                cursor += 1;
+
+                // Parse version
+                if cursor + 8 > data_end {
+                    break;
+                }
+                let version = u64::from_le_bytes(mmap[cursor..cursor + 8].try_into()?);
+                cursor += 8;
+
+                // Parse TTL if present
+                let ttl = if flags & FLAG_HAS_TTL != 0 {
+                    if cursor + 8 > data_end {
+                        break;
+                    }
+                    let expire_at = u64::from_le_bytes(mmap[cursor..cursor + 8].try_into()?);
+                    cursor += 8;
+                    Some(expire_at)
+                } else {
+                    None
+                };
+
+                // Parse key and value lengths
+                if cursor + 8 > data_end {
+                    break;
+                }
+
+                let key_len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into()?) as usize;
+                cursor += 4;
+
+                let val_len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into()?) as usize;
+                cursor += 4;
+
+                // Parse key and value
+                if cursor + key_len + val_len > data_end {
+                    break;
+                }
+
+                // Get key slice
+                let key_slice = &mmap[cursor..cursor + key_len];
+
+                let past_end = Self::slice_past_end(key_slice, &range_end);
+                if past_end {
+                    break;
+                }
+
+                let in_range = Self::slice_in_range(key_slice, &range_start, &range_end);
+                if !in_range {
+                    cursor += key_len + val_len;
+                    continue;
+                }
+
+                // Check TTL
+                if let Some(expire_at) = ttl
+                    && now >= expire_at
+                {
+                    cursor += key_len + val_len;
+                    continue;
+                }
+
+                let key: Arc<[u8]> = key_slice.to_vec().into();
+                cursor += key_len;
+                let value: Arc<[u8]> = mmap[cursor..cursor + val_len].to_vec().into();
+                cursor += val_len;
+
+                records.push(Record {
+                    key,
+                    value,
+                    version,
+                    ttl,
+                    is_tombstone: flags & FLAG_TOMBSTONE != 0,
+                });
+            }
+
+            Ok(records)
+        })
+        .await
+        .map_err(|err| {
+            FerroError::Io(std::io::Error::other(format!("SSTable scan failed: {err}")))
+        })?
+    }
+
+    /// Check if key slice is past the end bound
+    fn slice_past_end(key: &[u8], end: &Bound<Arc<[u8]>>) -> bool {
+        match end {
+            Bound::Included(e) => key > e.as_ref(),
+            Bound::Excluded(e) => key >= e.as_ref(),
+            Bound::Unbounded => false,
+        }
+    }
+
+    /// Check if key slice falls within range bounds
+    fn slice_in_range(key: &[u8], start: &Bound<Arc<[u8]>>, end: &Bound<Arc<[u8]>>) -> bool {
+        let after_start = match start {
+            Bound::Included(s) => key >= s.as_ref(),
+            Bound::Excluded(s) => key > s.as_ref(),
+            Bound::Unbounded => true,
+        };
+
+        let before_end = match end {
+            Bound::Included(e) => key <= e.as_ref(),
+            Bound::Excluded(e) => key < e.as_ref(),
+            Bound::Unbounded => true,
+        };
+
+        after_start && before_end
+    }
+
     /// Create `SSTable` from metadata (for compaction)
     pub fn from_metadata(
         path: PathBuf,
         level: u8,
         id: u64,
+        filter_offset: u64,
         index_offset: u64,
         first_key: Arc<[u8]>,
         last_key: Arc<[u8]>,
         size: u64,
     ) -> Self {
-        Self { path, level, id, index_offset, first_key, last_key, size }
+        Self { path, level, id, filter_offset, index_offset, first_key, last_key, size }
     }
 
     /// Open existing `SSTable` from disk (for startup recovery)
@@ -392,22 +593,24 @@ impl SSTable {
         let metadata = tokio::fs::metadata(&path).await?;
         let size = metadata.len();
 
-        if size < 12 {
+        if size < FOOTER_SIZE as u64 {
             return Err(FerroError::InvalidData("SSTable file too small".into()));
         }
 
         let path_clone = path.clone();
 
         // mmap operations are blocking, we delegate them to blocking thread pool to maintain non-blocking guarantee
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let file_std = std::fs::File::open(&path_clone)?;
             let mmap = unsafe { Mmap::map(&file_std)? };
 
-            let footer_start = (size - 12) as usize;
-            let footer = &mmap[footer_start..footer_start + 12];
+            // Read Footer (last 20 bytes): filter_offset(8) + index_offset(8) + magic(4)
+            let footer_start = (size - FOOTER_SIZE as u64) as usize;
+            let footer = &mmap[footer_start..footer_start + FOOTER_SIZE];
 
-            let index_offset = u64::from_le_bytes(footer[0..8].try_into()?);
-            let magic = u32::from_le_bytes(footer[8..12].try_into()?);
+            let filter_offset = u64::from_le_bytes(footer[0..8].try_into()?);
+            let index_offset = u64::from_le_bytes(footer[8..16].try_into()?);
+            let magic = u32::from_le_bytes(footer[16..20].try_into()?);
 
             if magic != FOOTER_MAGIC {
                 return Err(FerroError::Corruption(
@@ -420,7 +623,7 @@ impl SSTable {
 
             // Read Index Block to get first_key and last_key
             let index_start = index_offset as usize;
-            let index_end = (size - 12) as usize;
+            let index_end = (size - FOOTER_SIZE as u64) as usize;
             let index_buf = &mmap[index_start..index_end];
 
             let mut cursor = 0;
@@ -450,8 +653,9 @@ impl SSTable {
 
             // Scan all data blocks to find the actual last key
             // (Index only contains first keys of blocks, not the last key of SSTable)
+            // Data blocks end at filter_offset (Filter Block starts there)
             let data_start = 0;
-            let data_end = index_offset as usize;
+            let data_end = filter_offset as usize;
             let data_buf = &mmap[data_start..data_end];
 
             let mut last_key = Arc::clone(&first_key);
@@ -491,16 +695,21 @@ impl SSTable {
                 cursor += val_len;
             }
 
-            Ok((index_offset, first_key, last_key))
+            Ok(Arc::new(Self {
+                path,
+                level,
+                id,
+                filter_offset,
+                index_offset,
+                first_key,
+                last_key,
+                size,
+            }))
         })
         .await
         .map_err(|err| {
             FerroError::Io(std::io::Error::other(format!("SSTable open task failed: {err}")))
-        })??;
-
-        let (index_offset, first_key, last_key) = result;
-
-        Ok(Arc::new(Self { path, level, id, index_offset, first_key, last_key, size }))
+        })?
     }
 }
 
@@ -515,20 +724,18 @@ impl SSTIterator {
     /// Create iterator from `SSTable`
     pub async fn new(sstable: &SSTable) -> Result<Self> {
         let path = sstable.path.clone();
-        let data_end = sstable.index_offset as usize;
+        let data_end = sstable.filter_offset as usize;
 
         // mmap operations are blocking, we delegate them to blocking thread pool to maintain non-blocking guarantee
-        let mmap = tokio::task::spawn_blocking(move || -> Result<Mmap> {
+        tokio::task::spawn_blocking(move || {
             let file_std = std::fs::File::open(&path)?;
             let mmap = unsafe { Mmap::map(&file_std)? };
-            Ok(mmap)
+            Ok(Self { mmap, data_end, cursor: 0 })
         })
         .await
         .map_err(|err| {
             FerroError::Io(std::io::Error::other(format!("SSTIterator init task failed: {err}")))
-        })??;
-
-        Ok(Self { mmap, data_end, cursor: 0 })
+        })?
     }
 
     /// Get next record from Data Blocks (not `std::iter::Iterator` to avoid `Option<Result<Option<T>>>`)
@@ -652,6 +859,87 @@ mod tests {
         assert!(sst.contains_key_range(b"key200"));
         assert!(!sst.contains_key_range(b"key050")); // Before range
         assert!(!sst.contains_key_range(b"key400")); // After range
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_negative_lookup() {
+        let db_dir = tempdir().unwrap().keep();
+        let _ = tokio::fs::create_dir_all(&db_dir).await;
+
+        let memtable = Memtable::default();
+        for i in 0..100 {
+            let key = format!("key_{i:03}");
+            let value = format!("value_{i:03}");
+            memtable.insert(key.as_bytes(), value.as_bytes(), None);
+        }
+
+        let sst = SSTable::flush(&db_dir, &memtable, 0, 1).await.unwrap();
+
+        // Bloom filter should return false for definitely non-existent keys
+        // (Note: false positives possible, but with 1% FPR should be rare)
+        let mut false_negatives = 0;
+        for i in 1000..1100 {
+            let key = format!("nonexistent_{i}");
+            let result = sst.get(key.as_bytes()).await.unwrap();
+            if result.is_some() {
+                false_negatives += 1;
+            }
+        }
+        assert_eq!(false_negatives, 0, "Bloom filter must not have false negatives");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_positive_lookup() {
+        let db_dir = tempdir().unwrap().keep();
+        let _ = tokio::fs::create_dir_all(&db_dir).await;
+
+        let memtable = Memtable::default();
+        for i in 0..50 {
+            let key = format!("existing_{i:03}");
+            let value = format!("value_{i:03}");
+            memtable.insert(key.as_bytes(), value.as_bytes(), None);
+        }
+
+        let sst = SSTable::flush(&db_dir, &memtable, 0, 1).await.unwrap();
+
+        // All existing keys must be found (bloom filter must not have false negatives)
+        for i in 0..50 {
+            let key = format!("existing_{i:03}");
+            let result = sst.get(key.as_bytes()).await.unwrap();
+            assert!(result.is_some(), "Key {key} must be found");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sstable_open_with_bloom_filter() {
+        let db_dir = tempdir().unwrap().keep();
+        let _ = tokio::fs::create_dir_all(&db_dir).await;
+
+        // Create SSTable
+        let memtable = Memtable::default();
+        memtable.insert(b"alpha", b"one", None);
+        memtable.insert(b"beta", b"two", None);
+        memtable.insert(b"gamma", b"three", None);
+
+        let sst = SSTable::flush(&db_dir, &memtable, 0, 1).await.unwrap();
+        let sst_path = sst.path().to_path_buf();
+        drop(sst);
+
+        // Reopen from disk
+        let reopened = SSTable::open(sst_path).await.unwrap();
+
+        // Verify bloom filter works after reopen
+        let result = reopened.get(b"beta").await.unwrap();
+        assert_eq!(result.unwrap().0.as_ref(), b"two");
+
+        let result = reopened.get(b"nonexistent").await.unwrap();
+        assert!(result.is_none());
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }

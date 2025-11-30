@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::bloom::BloomFilter;
 use crate::errors::{FerroError, Result};
-use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, get_now};
+use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, FOOTER_SIZE, get_now};
 use crate::sstable::{FLAG_HAS_TTL, Record, SSTIterator, SSTable};
 
 /// Heap entry for multi-way merge
@@ -44,6 +45,7 @@ struct SSTBuilder {
     id: u64,
     block_buffer: Vec<u8>,
     index_entries: Vec<(Arc<[u8]>, u64)>,
+    keys: Vec<Arc<[u8]>>,
     first_key: Option<Arc<[u8]>>,
     last_key: Arc<[u8]>,
     current_offset: u64,
@@ -59,6 +61,7 @@ impl SSTBuilder {
             id,
             block_buffer: Vec::with_capacity(BLOCK_SIZE),
             index_entries: Vec::new(),
+            keys: Vec::new(),
             first_key: None,
             last_key: Arc::from(Vec::new()),
             current_offset: 0,
@@ -68,6 +71,9 @@ impl SSTBuilder {
     }
 
     fn add(&mut self, key: &[u8], value: &[u8], version: u64, ttl: Option<u64>) {
+        // Collect key for Bloom filter
+        self.keys.push(Arc::from(key));
+
         // Track first/last keys
         if self.first_key.is_none() {
             self.first_key = Some(Arc::from(key));
@@ -136,9 +142,18 @@ impl SSTBuilder {
             total_offset += self.block_buffer.len() as u64;
         }
 
-        let index_offset = total_offset;
+        // Write Filter Block
+        let filter_offset = total_offset;
+        let mut bloom_filter = BloomFilter::new(self.keys.len(), 0.01);
+        for key in &self.keys {
+            bloom_filter.insert(key);
+        }
+        let filter_data = bloom_filter.serialize();
+        file.write_all(&filter_data).await?;
+        total_offset += filter_data.len() as u64;
 
         // Write Index Block
+        let index_offset = total_offset;
         let index_count = self.index_entries.len() as u32;
         file.write_all(&index_count.to_le_bytes()).await?;
         total_offset += 4;
@@ -151,10 +166,11 @@ impl SSTBuilder {
             total_offset += 4 + u64::from(key_len) + 8;
         }
 
-        // Write Footer
+        // Write Footer: filter_offset(8) + index_offset(8) + magic(4) = 20 bytes
+        file.write_all(&filter_offset.to_le_bytes()).await?;
         file.write_all(&index_offset.to_le_bytes()).await?;
         file.write_all(&FOOTER_MAGIC.to_le_bytes()).await?;
-        total_offset += 12;
+        total_offset += FOOTER_SIZE as u64;
 
         // ACID: Durability guarantee
         file.sync_all().await?;
@@ -170,6 +186,7 @@ impl SSTBuilder {
             path,
             self.level,
             self.id,
+            filter_offset,
             index_offset,
             first_key,
             Arc::clone(&self.last_key),
@@ -182,6 +199,7 @@ impl SSTBuilder {
         self.id = self.next_id.fetch_add(1, AtomicOrdering::SeqCst);
         self.block_buffer.clear();
         self.index_entries.clear();
+        self.keys.clear();
         self.first_key = None;
         self.last_key = Arc::from(Vec::new());
         self.current_offset = 0;
