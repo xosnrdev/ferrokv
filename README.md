@@ -57,8 +57,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let visits = db.incr(b"site:visits").await?;
     println!("Visits: {visits}");
 
-    // 5. Delete
+    // 5. Scan
+    let results = db.scan(..).await?;
+    for (key, value) in &results {
+        println!("{} = {}", String::from_utf8_lossy(key), String::from_utf8_lossy(value));
+    }
+    
+    // 6. Delete
     db.del(b"user:101").await?;
+
 
     Ok(())
 }
