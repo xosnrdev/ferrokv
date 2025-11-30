@@ -1,4 +1,6 @@
-use crc32fast::Hasher;
+use std::hash::Hasher;
+
+use twox_hash::XxHash64;
 
 use crate::errors::{FerroError, Result};
 
@@ -99,19 +101,19 @@ impl BloomFilter {
         Ok(Self { bits, num_hashes, num_bits })
     }
 
-    /// Compute two independent hash values using CRC32 with different seeds.
+    /// Compute two independent hash values using `XxHash64` with different seeds.
     ///
     /// Kirsch-Mitzenmacher: h(i) = h1 + i * h2
     fn hash_pair(key: &[u8]) -> (u64, u64) {
-        // Hash 1: CRC32 of key directly
-        let mut hasher1 = Hasher::new();
-        hasher1.update(key);
-        let h1 = u64::from(hasher1.finalize());
+        // Hash 1: XxHash64 with seed 0
+        let mut hasher1 = XxHash64::with_seed(0);
+        hasher1.write(key);
+        let h1 = hasher1.finish();
 
-        // Hash 2: CRC32 of key with a different seed (append marker byte)
-        let mut hasher2 = Hasher::new_with_initial(0xDEAD_BEEF);
-        hasher2.update(key);
-        let h2 = u64::from(hasher2.finalize());
+        // Hash 2: XxHash64 with a different seed
+        let mut hasher2 = XxHash64::with_seed(0xDEAD_BEEF_u64);
+        hasher2.write(key);
+        let h2 = hasher2.finish();
 
         (h1, h2)
     }
