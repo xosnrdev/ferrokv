@@ -103,6 +103,9 @@ impl Ferrokv {
     /// Read the value of `key`
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
 
+    /// Scan a range of keys
+    pub async fn scan(&self, range: impl RangeBounds<&[u8]) -> Result<Vec<(Bytes, Bytes)>>;
+
     /// Delete with Tombstone Marking
     pub async fn del(&self, key: &[u8]) -> Result<bool>;
 

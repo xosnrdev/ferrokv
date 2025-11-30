@@ -66,7 +66,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Delete
     db.del(b"user:101").await?;
 
-
     Ok(())
 }
 ```
