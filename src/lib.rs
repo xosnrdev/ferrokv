@@ -76,6 +76,7 @@
 //! - [TTL expiration](https://github.com/xosnrdev/ferrokv/blob/master/examples/ttl.rs)
 //! - [Atomic counters](https://github.com/xosnrdev/ferrokv/blob/master/examples/incr.rs)
 //! - [Explicit deletion](https://github.com/xosnrdev/ferrokv/blob/master/examples/del.rs)
+//! - [Batch writes](https://github.com/xosnrdev/ferrokv/blob/master/examples/batch.rs)
 //! - [Custom configuration](https://github.com/xosnrdev/ferrokv/blob/master/examples/config.rs)
 //!
 //! ## Error Handling
@@ -119,6 +120,7 @@
     clippy::too_many_arguments
 )]
 
+pub(crate) mod batch;
 pub(crate) mod bloom;
 pub(crate) mod compaction;
 pub(crate) mod config;
@@ -131,6 +133,7 @@ pub(crate) mod storage;
 pub(crate) mod ttl;
 pub(crate) mod wal;
 
+pub use batch::WriteBatch;
 pub use errors::FerroError;
 use mimalloc::MiMalloc;
 pub use storage::FerroKv;

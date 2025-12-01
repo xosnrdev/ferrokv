@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Opening database at {}", db_dir.display());
     // Open database with default configuration
-    let db = FerroKv::open(db_dir.clone()).await?;
+    let db = FerroKv::open(&db_dir).await?;
 
     // Write some keys with different prefixes
     println!("Writing keys...");

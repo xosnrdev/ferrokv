@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Opening database at {}", db_dir.display());
     // Open database with default configuration
-    let db = FerroKv::open(db_dir.clone()).await?;
+    let db = FerroKv::open(&db_dir).await?;
 
     // Atomic increment operations
     println!("Incrementing counter...");
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(db);
 
     // Counter persists across restarts
-    let db = FerroKv::open(db_dir.clone()).await?;
+    let db = FerroKv::open(&db_dir).await?;
     let count = db.incr(b"visits").await?;
     println!("persisted visits = {count}");
 

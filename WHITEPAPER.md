@@ -111,6 +111,9 @@ impl Ferrokv {
 
     /// Atomic Increment (Read-Modify-Write)
     pub async fn incr(&self, key: &[u8]) -> Result<i64>;
+
+    /// Execute batch with single fsync (Group Commit)
+    pub async fn write_batch(&self, batch: WriteBatch) -> Result<()>;
 }
 ```
 

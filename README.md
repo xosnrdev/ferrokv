@@ -62,9 +62,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (key, value) in &results {
         println!("{} = {}", String::from_utf8_lossy(key), String::from_utf8_lossy(value));
     }
-    
+
     // 6. Delete
     db.del(b"user:101").await?;
+
+    Ok(())
+}
+```
+
+### Batch Writes (Group Commit)
+
+Use `WriteBatch` to amortize the cost of `fsync` across multiple operations:
+
+```rust
+use std::time::Duration;
+
+use ferrokv::{FerroKv, WriteBatch};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = FerroKv::open("./data").await?;
+
+    // Collect multiple writes into a batch
+    let mut batch = WriteBatch::new();
+    batch
+        .set(b"foo:1", b"bar")
+        .set(b"foo:2", b"baz")
+        .set_ex(b"foo:3", b"qux", Duration::from_secs(3600))
+        .del(b"foo:2");
+
+    // Execute with single fsync
+    db.write_batch(batch).await?;
 
     Ok(())
 }

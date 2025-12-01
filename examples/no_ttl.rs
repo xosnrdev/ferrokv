@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Opening database at {}", db_dir.display());
     // Open database with default configuration
-    let db = FerroKv::open(db_dir.clone()).await?;
+    let db = FerroKv::open(&db_dir).await?;
 
     // Write KVs
     println!("Writing keys...");
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(db);
 
     // Read persisted data
-    let db = FerroKv::open(db_dir.clone()).await?;
+    let db = FerroKv::open(&db_dir).await?;
     let value = db.get(b"user:1").await?;
     println!("persisted user:1 = {}", String::from_utf8_lossy(&value.unwrap()));
     let value = db.get(b"user:2").await?;

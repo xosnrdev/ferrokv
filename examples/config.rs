@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Opening database at {}", db_dir.display());
     // Open database with custom configuration
-    let db = FerroKv::builder(db_dir.clone())
+    let db = FerroKv::builder(&db_dir)
         .memtable_size(128 * 1024 * 1024)
         .l0_compaction_threshold(8)
         .sstable_size(8 * 1024 * 1024)
