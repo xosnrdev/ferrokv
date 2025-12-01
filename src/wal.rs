@@ -11,6 +11,9 @@ use crate::errors::{FerroError, Result};
 /// Special TTL value to mark tombstones
 const TOMBSTONE_MARKER: u64 = u64::MAX;
 
+/// Type alias for batch entry: (key, value, ttl, `is_tombstone`)
+pub type BatchWalEntry<'a> = (&'a [u8], &'a [u8], Option<u64>, bool);
+
 /// WAL entry representation in memory
 #[derive(Debug)]
 pub struct WalEntry {
@@ -118,20 +121,19 @@ impl Wal {
     }
 
     /// Write multiple entries with single fsync
-    #[cfg(test)]
-    pub async fn append_batch(&mut self, entries: &[(&[u8], &[u8], Option<u64>)]) -> Result<()> {
+    pub async fn append_batch(&mut self, entries: &[BatchWalEntry<'_>]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
 
         // Calculate total size for all entries
-        let total_size = entries.iter().map(|(k, v, _)| 20 + k.len() + v.len()).sum();
+        let total_size = entries.iter().map(|(k, v, ..)| 20 + k.len() + v.len()).sum();
 
         self.write_buf.clear();
         self.write_buf.reserve(total_size);
 
         // Serialize all entries into buffer
-        for (key, value, ttl) in entries {
+        for (key, value, ttl, is_tombstone) in entries {
             let start_pos = self.write_buf.len();
             let entry_len = 20 + key.len() + value.len();
 
@@ -142,7 +144,7 @@ impl Wal {
             // Write entry header
             let key_len = key.len() as u32;
             let val_len = value.len() as u32;
-            let ttl_val = ttl.unwrap_or_default();
+            let ttl_val = if *is_tombstone { TOMBSTONE_MARKER } else { ttl.unwrap_or_default() };
 
             entry_slice[4..8].copy_from_slice(&key_len.to_le_bytes());
             entry_slice[8..12].copy_from_slice(&val_len.to_le_bytes());
@@ -321,9 +323,9 @@ mod tests {
 
             // Group commit: 3 entries, 1 fsync
             wal.append_batch(&[
-                (b"key1", b"value1", None),
-                (b"key2", b"value2", Some(ttl_3600)),
-                (b"key3", b"value3", None),
+                (b"key1", b"value1", None, false),
+                (b"key2", b"value2", Some(ttl_3600), false),
+                (b"key3", b"value3", None, false),
             ])
             .await
             .unwrap();
@@ -348,6 +350,37 @@ mod tests {
         assert_eq!(entries[2].key, Bytes::from("key3"));
         assert_eq!(entries[2].value, Bytes::from("value3"));
         assert_eq!(entries[2].ttl, None);
+
+        tokio::fs::remove_file(&wal_path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_batch_with_tombstones() {
+        let wal_path = wal_path();
+
+        {
+            let mut wal = Wal::new(wal_path.clone()).await.unwrap();
+
+            wal.append_batch(&[
+                (b"key1", b"value1", None, false),
+                (b"key2", b"", None, true),
+                (b"key3", b"value3", None, false),
+            ])
+            .await
+            .unwrap();
+        }
+
+        let entries = Wal::recover(&wal_path).await.unwrap();
+        assert_eq!(entries.len(), 3);
+
+        assert!(!entries[0].is_tombstone);
+        assert_eq!(entries[0].key, Bytes::from("key1"));
+
+        assert!(entries[1].is_tombstone, "Tombstone flag must be preserved");
+        assert_eq!(entries[1].key, Bytes::from("key2"));
+
+        assert!(!entries[2].is_tombstone);
+        assert_eq!(entries[2].key, Bytes::from("key3"));
 
         tokio::fs::remove_file(&wal_path).await.unwrap();
     }
