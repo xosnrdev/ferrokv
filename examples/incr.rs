@@ -6,40 +6,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: Using a temporary directory for demonstration.
     let db_dir = tempdir()?.keep();
 
-    println!("Opening database at {}", db_dir.display());
-    // Open database with default configuration
     let db = FerroKv::open(&db_dir).await?;
 
-    // Atomic increment operations
-    println!("Incrementing counter...");
-    let count = db.incr(b"visits").await?;
-    println!("visits = {count}");
+    let count = db.incr(b"foo").await?;
+    println!("foo = {count}");
 
-    let count = db.incr(b"visits").await?;
-    println!("visits = {count}");
+    let count = db.incr(b"foo").await?;
+    println!("foo = {count}");
 
-    let count = db.incr(b"visits").await?;
-    println!("visits = {count}");
+    let count = db.incr(b"foo").await?;
+    println!("foo = {count}");
 
     println!("\nRestarting database...");
     // Drop DB to simulate restart
     drop(db);
 
-    // Counter persists across restarts
     let db = FerroKv::open(&db_dir).await?;
-    let count = db.incr(b"visits").await?;
-    println!("persisted visits = {count}");
-
-    // Multiple counters
-    println!("\nUsing multiple counters...");
-    let page_views = db.incr(b"stats:page_views").await?;
-    println!("stats:page_views = {page_views}");
-
-    let api_calls = db.incr(b"stats:api_calls").await?;
-    println!("stats:api_calls = {api_calls}");
-
-    let page_views = db.incr(b"stats:page_views").await?;
-    println!("stats:page_views = {page_views}");
+    let count = db.incr(b"foo").await?;
+    println!("foo = {count}");
 
     // Cleanup
     drop(db);

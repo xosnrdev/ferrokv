@@ -141,6 +141,9 @@ impl FerroKv {
 
     /// Insert or update a key with the given value
     pub async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        #[cfg(debug_assertions)]
+        println!("SET {} {}", String::from_utf8_lossy(key), String::from_utf8_lossy(value));
+
         let mut wal = self.wal.lock().await;
         wal.append(key, value, None).await?;
         wal.sync().await?;
@@ -157,7 +160,17 @@ impl FerroKv {
 
     /// Insert or update a key with the given value and a TTL expiration
     pub async fn set_ex(&self, key: &[u8], value: &[u8], ttl: Duration) -> Result<()> {
-        let expire_at = get_now() + ttl.as_secs();
+        let ttl = ttl.as_secs();
+
+        #[cfg(debug_assertions)]
+        println!(
+            "SETEX {} {} {}",
+            String::from_utf8_lossy(key),
+            String::from_utf8_lossy(value),
+            ttl
+        );
+
+        let expire_at = get_now() + ttl;
 
         let mut wal = self.wal.lock().await;
         wal.append(key, value, Some(expire_at)).await?;
@@ -203,6 +216,9 @@ impl FerroKv {
     /// Delete the `key`
     /// Returns true if key existed, otherwise false
     pub async fn del(&self, key: &[u8]) -> Result<bool> {
+        #[cfg(debug_assertions)]
+        println!("DEL {}", String::from_utf8_lossy(key));
+
         let existed = self.get(key).await?.is_some();
 
         // Write tombstone to WAL for durability
@@ -301,6 +317,9 @@ impl FerroKv {
 
     /// Increment the `key` atomically
     pub async fn incr(&self, key: &[u8]) -> Result<i64> {
+        #[cfg(debug_assertions)]
+        println!("INCR {}", String::from_utf8_lossy(key));
+
         // Acquire lock to serialize Read-Modify-Write operations
         let _lock = self.incr_lock.lock().await;
 
