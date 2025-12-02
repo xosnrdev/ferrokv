@@ -6,7 +6,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: Using a temporary directory for demonstration.
     let db_dir = tempdir()?.keep();
 
-    println!("Opening database at {}", db_dir.display());
     // Open database with custom configuration
     let db = FerroKv::builder(&db_dir)
         .memtable_size(128 * 1024 * 1024)
@@ -17,8 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     db.set(b"foo", b"bar").await?;
 
-    let value = db.get(b"foo").await?;
-    println!("foo = {}", String::from_utf8_lossy(&value.unwrap()));
+    if let Some(value) = db.get(b"foo").await? {
+        println!("foo = {}", String::from_utf8_lossy(&value));
+    }
 
     // Cleanup
     drop(db);
