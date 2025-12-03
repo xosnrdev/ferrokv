@@ -1,10 +1,12 @@
 [package]
 name = "ferrokv"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["Success Kingsley <xosnrdev@gmail.com>"]
 description = "The embedded, async, Redis-inspired key-value store for Rust."
 repository = "https://github.com/xosnrdev/ferrokv"
+categories = ["asynchronous", "embedded", "database"]
+keywords = ["key-value", "async", "tokio"]
 license = "MIT"
 
 [dependencies]
