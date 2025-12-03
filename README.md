@@ -21,6 +21,13 @@ Ferrokv is built on six non-negotiable pillars:
 5.  **First-Class TTL:** Expiration is handled natively via lazy checks and compaction filtering. No manual "cleanup" threads required.
 6.  **Persistent Only:** No volatile-only modes. If the power goes out, your data is safe.
 
+## Experimental `io_uring` Support (Linux)
+
+On Linux, Ferrokv can leverage `io_uring` for high-performance asynchronous I/O. This feature is powered by tokio's native `io-uring` integration, which is currently marked as **unstable**.
+
+See: https://github.com/tokio-rs/tokio/discussions/7684
+See: https://github.com/tokio-rs/tokio/pull/7621
+
 ## Quick Start
 
 Add this to your `Cargo.toml`:
