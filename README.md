@@ -26,7 +26,15 @@ Ferrokv is built on six non-negotiable pillars:
 On Linux, Ferrokv can leverage `io_uring` for high-performance asynchronous I/O. This feature is powered by tokio's native `io-uring` integration, which is currently marked as **unstable**.
 
 See: https://github.com/tokio-rs/tokio/discussions/7684
+
 See: https://github.com/tokio-rs/tokio/pull/7621
+
+To enable, add the feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+ferrokv = { version = "1", features = ["io-uring"] }
+```
 
 ## Quick Start
 

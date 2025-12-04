@@ -111,6 +111,7 @@
 //! Read the [WHITEPAPER](https://github.com/xosnrdev/ferrokv/blob/master/WHITEPAPER.md)
 //! for implementation details and design decisions.
 
+#![warn(clippy::pedantic)]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::missing_errors_doc,

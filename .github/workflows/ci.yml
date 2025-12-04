@@ -13,6 +13,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: --cfg tokio_unstable
 
 jobs:
   check:
@@ -43,11 +44,23 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Install Rust
-        run: |
-          rustup toolchain install nightly --no-self-update --profile minimal --component rust-src,rustfmt,clippy
+        run: rustup toolchain install nightly --no-self-update --profile minimal --component rust-src,rustfmt,clippy
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Run tests
+        run: cargo test --all-targets
+        if: matrix.os != 'ubuntu-latest'
+
+      - name: Run tests (Linux)
         run: cargo test --all-features --all-targets
+        if: matrix.os == 'ubuntu-latest'
+
       - name: Run clippy
+        run: cargo clippy --all-targets -- --no-deps --deny warnings -W clippy::pedantic
+        if: matrix.os != 'ubuntu-latest'
+
+      - name: Run clippy (Linux)
         run: cargo clippy --all-features --all-targets -- --no-deps --deny warnings -W clippy::pedantic
+        if: matrix.os == 'ubuntu-latest'
