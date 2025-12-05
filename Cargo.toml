@@ -10,7 +10,6 @@ keywords = ["key-value", "async", "tokio"]
 license = "MIT"
 
 [features]
-default = []
 io-uring = ["tokio/io-uring"]
 
 [dependencies]
