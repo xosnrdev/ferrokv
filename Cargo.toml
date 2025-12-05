@@ -1,6 +1,6 @@
 [package]
 name = "ferrokv"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 authors = ["Success Kingsley <xosnrdev@gmail.com>"]
 description = "The embedded, async, Redis-inspired key-value store for Rust."
