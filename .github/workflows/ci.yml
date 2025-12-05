@@ -13,7 +13,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: --cfg tokio_unstable
 
 jobs:
   check:
@@ -55,6 +54,8 @@ jobs:
 
       - name: Run tests (Linux)
         run: cargo test --all-features --all-targets
+        env:
+          RUSTFLAGS: --cfg tokio_unstable
         if: matrix.os == 'ubuntu-latest'
 
       - name: Run clippy
@@ -63,4 +64,6 @@ jobs:
 
       - name: Run clippy (Linux)
         run: cargo clippy --all-features --all-targets -- --no-deps --deny warnings -W clippy::pedantic
+        env:
+          RUSTFLAGS: --cfg tokio_unstable
         if: matrix.os == 'ubuntu-latest'
