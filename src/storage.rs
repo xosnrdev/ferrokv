@@ -146,7 +146,6 @@ impl FerroKv {
 
         let mut wal = self.wal.lock().await;
         wal.append(key, value, None).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, value, None);
@@ -174,7 +173,6 @@ impl FerroKv {
 
         let mut wal = self.wal.lock().await;
         wal.append(key, value, Some(expire_at)).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, value, Some(expire_at));
@@ -224,7 +222,6 @@ impl FerroKv {
         // Write tombstone to WAL for durability
         let mut wal = self.wal.lock().await;
         wal.append_tombstone(key).await?;
-        wal.sync().await?;
         drop(wal);
 
         // Write tombstone to Memtable
@@ -344,7 +341,6 @@ impl FerroKv {
         // Write back atomically via WAL
         let mut wal = self.wal.lock().await;
         wal.append(key, new_val, None).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, new_val, None);
