@@ -24,4 +24,9 @@ tokio-stream = "0.1.17"
 twox-hash = { version = "2.1.2", default-features = false, features = ["xxhash64"] }
 
 [dev-dependencies]
+criterion = { version = "0.8.0", features = ["async_tokio", "html_reports"] }
 tempfile = "3.23.0"
+
+[[bench]]
+name = "lib"
+harness = false
