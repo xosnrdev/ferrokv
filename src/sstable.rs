@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::bloom::BloomFilter;
 use crate::errors::{FerroError, Result};
-use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, FOOTER_SIZE, get_now};
+use crate::helpers::{BLOCK_SIZE, FOOTER_MAGIC, FOOTER_SIZE, get_cached_now};
 use crate::memtable::Memtable;
 use crate::storage::ScanBounds;
 
@@ -274,9 +274,9 @@ impl SSTable {
                         return Ok(None);
                     }
 
-                    // TTL lazy eviction
+                    // TTL lazy eviction with cached timestamp
                     if let Some(expire_at) = ttl
-                        && get_now() >= expire_at
+                        && get_cached_now() >= expire_at
                     {
                         return Ok(None);
                     }

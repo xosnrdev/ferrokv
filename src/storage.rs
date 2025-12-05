@@ -13,7 +13,7 @@ use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
 use crate::config::{Config, FerroKvBuilder};
 use crate::errors::Result;
-use crate::helpers::get_now;
+use crate::helpers::{get_now, refresh_cached_timestamp};
 use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
 use crate::ttl::ExpiryHeap;
@@ -135,6 +135,11 @@ impl FerroKv {
         let expiry_heap = Arc::clone(&expiry_heap);
         tokio::spawn(async move {
             Self::run_expiry_cleanup(memtable, expiry_heap).await;
+        });
+
+        // Spawn background timestamp refresh task
+        tokio::spawn(async move {
+            Self::run_timestamp_refresh().await;
         });
 
         Ok(db)
@@ -445,6 +450,14 @@ impl FerroKv {
                 }
                 () = expiry_heap.notifier().notified() => {}
             }
+        }
+    }
+
+    /// Background task to refresh cached timestamp
+    async fn run_timestamp_refresh() {
+        loop {
+            refresh_cached_timestamp();
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
