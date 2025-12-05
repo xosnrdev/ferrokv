@@ -14,6 +14,7 @@ default = []
 io-uring = ["tokio/io-uring"]
 
 [dependencies]
+arc-swap = "1.7.1"
 bytes = "1.11.0"
 crc32fast = "1.5.0"
 crossbeam-skiplist = "0.1.3"
