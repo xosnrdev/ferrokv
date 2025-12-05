@@ -79,6 +79,24 @@
 //! - **Native TTL**: Automatic expiration without manual cleanup
 //! - **Persistent Only**: Data survives crashes and restarts
 //!
+//! ## Experimental `io_uring` Support (Linux)
+//!
+//! On Linux, Ferrokv can leverage `io_uring` for high-performance asynchronous I/O.
+//! This feature is powered by tokio's native `io-uring` integration, which is currently marked as **unstable**.
+//!
+//! See: <https://github.com/tokio-rs/tokio/discussions/7684>
+//!
+//! See: <https://github.com/tokio-rs/tokio/pull/7621>
+//!
+//! To enable, add the feature in your `Cargo.toml`:
+//!
+//! ```toml
+//! [dependencies]
+//! ferrokv = { version = "1", features = ["io-uring"] }
+//! ```
+//!
+//! Then, set `RUSTFLAGS="--cfg tokio_unstable"` in your environment to enable unstable tokio features.
+//!
 //! ## Configuration
 //!
 //! Tune memory and compaction thresholds:
