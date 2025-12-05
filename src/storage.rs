@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, RwLock};
+use arc_swap::ArcSwap;
+use tokio::sync::Mutex;
 
 use crate::WriteBatch;
 use crate::batch::BatchEntry;
@@ -30,7 +31,7 @@ pub type ScanBounds = (Bound<Arc<[u8]>>, Bound<Arc<[u8]>>);
 pub struct FerroKv {
     wal: Mutex<Wal>,
     memtable: Arc<Memtable>,
-    sstables: Arc<RwLock<Vec<Arc<SSTable>>>>,
+    sstables: Arc<ArcSwap<Vec<Arc<SSTable>>>>,
     next_sst_id: Arc<AtomicU64>,
     db_dir: PathBuf,
     expiry_heap: Arc<ExpiryHeap>,
@@ -114,7 +115,7 @@ impl FerroKv {
         // Sort SSTables by level and ID for optimal read performance
         sstables.sort_by(|a, b| a.level().cmp(&b.level()).then_with(|| a.id().cmp(&b.id())));
 
-        let sstables = Arc::new(RwLock::new(sstables));
+        let sstables = Arc::new(ArcSwap::from_pointee(sstables));
         let next_sst_id = Arc::new(AtomicU64::new(max_sst_id + 1));
         let expiry_heap = Arc::new(ExpiryHeap::default());
 
@@ -146,7 +147,6 @@ impl FerroKv {
 
         let mut wal = self.wal.lock().await;
         wal.append(key, value, None).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, value, None);
@@ -174,7 +174,6 @@ impl FerroKv {
 
         let mut wal = self.wal.lock().await;
         wal.append(key, value, Some(expire_at)).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, value, Some(expire_at));
@@ -199,7 +198,7 @@ impl FerroKv {
             LookupResult::NotFound => {}
         }
 
-        let sstables = self.sstables.read().await;
+        let sstables = self.sstables.load();
         for sst in sstables.iter().rev() {
             if !sst.contains_key_range(key) {
                 continue;
@@ -224,7 +223,6 @@ impl FerroKv {
         // Write tombstone to WAL for durability
         let mut wal = self.wal.lock().await;
         wal.append_tombstone(key).await?;
-        wal.sync().await?;
         drop(wal);
 
         // Write tombstone to Memtable
@@ -259,7 +257,7 @@ impl FerroKv {
             }
         }
 
-        let sstables = self.sstables.read().await;
+        let sstables = self.sstables.load();
         for sst in sstables.iter() {
             if sst.overlaps_range(&bounds) {
                 for record in sst.scan_range(&bounds, now).await? {
@@ -344,7 +342,6 @@ impl FerroKv {
         // Write back atomically via WAL
         let mut wal = self.wal.lock().await;
         wal.append(key, new_val, None).await?;
-        wal.sync().await?;
         drop(wal);
 
         self.memtable.insert(key, new_val, None);
@@ -458,14 +455,15 @@ impl FerroKv {
         // Flush to Level 0 (fresh flushes)
         let sst = SSTable::flush(&self.db_dir, &self.memtable, 0, sst_id).await?;
 
-        // Add to SSTable list
-        let mut sstables = self.sstables.write().await;
-        sstables.push(sst);
-
-        // Check if compaction needed
-        let l0_count = sstables.iter().filter(|s| s.level() == 0).count();
-        let should_compact = l0_count > self.config.l0_compaction_threshold;
-        drop(sstables);
+        // Add to SSTable list atomically using RCU pattern
+        let should_compact = {
+            let old = self.sstables.load();
+            let mut new_list = (**old).clone();
+            new_list.push(sst);
+            let l0_count = new_list.iter().filter(|s| s.level() == 0).count();
+            self.sstables.store(Arc::new(new_list));
+            l0_count > self.config.l0_compaction_threshold
+        };
 
         // Clear Memtable and truncate WAL
         self.memtable.clear();
@@ -496,15 +494,15 @@ impl FerroKv {
 
     /// Background compaction to merge L0 `SSTables` to L1
     async fn run_compaction(
-        sstables: Arc<RwLock<Vec<Arc<SSTable>>>>,
+        sstables: Arc<ArcSwap<Vec<Arc<SSTable>>>>,
         db_dir: PathBuf,
         next_id: Arc<AtomicU64>,
         config: Arc<Config>,
     ) -> Result<()> {
         // Select L0 SSTables for compaction
-        let l0_sstables = {
-            let guard = sstables.read().await;
-            guard.iter().filter(|s| s.level() == 0).map(Arc::clone).collect::<Vec<_>>()
+        let l0_sstables: Vec<Arc<SSTable>> = {
+            let guard = sstables.load();
+            guard.iter().filter(|s| s.level() == 0).map(Arc::clone).collect()
         };
 
         if l0_sstables.len() <= config.l0_compaction_threshold {
@@ -515,11 +513,14 @@ impl FerroKv {
         let new_sstables =
             merge_sstables(&l0_sstables, 1, &db_dir, &next_id, config.sstable_size).await?;
 
-        // Atomic commit
-        let mut guard = sstables.write().await;
-        guard.retain(|sst| !l0_sstables.iter().any(|old| old.path() == sst.path()));
-        guard.extend(new_sstables);
-        drop(guard);
+        // Atomic commit using RCU pattern
+        {
+            let old = sstables.load();
+            let mut new_list = (**old).clone();
+            new_list.retain(|sst| !l0_sstables.iter().any(|old| old.path() == sst.path()));
+            new_list.extend(new_sstables);
+            sstables.store(Arc::new(new_list));
+        }
 
         // Delete old SSTables ONLY AFTER new ones visible
         for old_sst in l0_sstables {
@@ -734,7 +735,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify L0 count reduced (read amplification improved)
-        let sstables = db.sstables.read().await;
+        let sstables = db.sstables.load();
         let l0_count = sstables.iter().filter(|s| s.level() == 0).count();
         assert!(l0_count <= 4, "Compaction should reduce L0 count to <= 4, got {l0_count}");
 
@@ -925,7 +926,7 @@ mod tests {
             db.flush_memtable().await.unwrap();
 
             // Verify SSTable exists
-            let sstables = db.sstables.read().await;
+            let sstables = db.sstables.load();
             assert!(!sstables.is_empty(), "SSTable should be created");
         } // Drop DB (simulates restart)
 
@@ -934,7 +935,7 @@ mod tests {
             let db = FerroKv::open(&db_dir).await.unwrap();
 
             // Verify SSTables were loaded
-            let sstables = db.sstables.read().await;
+            let sstables = db.sstables.load();
             assert!(!sstables.is_empty(), "SSTables should be loaded on restart");
 
             // Verify data is accessible (not just in WAL)
