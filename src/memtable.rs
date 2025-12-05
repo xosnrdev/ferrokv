@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_skiplist::SkipMap;
 
-use crate::helpers::get_cached_now;
+use crate::helpers::get_now;
 use crate::mvcc::VersionCounter;
 use crate::storage::ScanBounds;
 
@@ -88,7 +88,7 @@ impl Memtable {
         }
 
         if let Some(ttl) = entry_val.ttl {
-            let now = get_cached_now();
+            let now = get_now();
             if now > ttl {
                 return LookupResult::Tombstone;
             }
