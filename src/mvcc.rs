@@ -13,11 +13,13 @@ impl Default for VersionCounter {
 
 impl VersionCounter {
     /// Get next version number (monotonically increasing)
+    #[inline]
     pub fn next_version(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Get current version without incrementing
+    #[inline]
     pub fn current_version(&self) -> u64 {
         self.counter.load(Ordering::SeqCst)
     }

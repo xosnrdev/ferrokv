@@ -71,6 +71,7 @@ impl Memtable {
     /// Returns `NotFound` if key doesn't exist or version too new
     /// Returns `Tombstone` if key exists but is deleted or expired
     /// Returns `Value` if key exists with a valid value
+    #[inline]
     pub fn get(&self, key: &[u8], snapshot_version: u64) -> LookupResult {
         let Some(entry) = self.data.get(key) else {
             return LookupResult::NotFound;
@@ -98,11 +99,13 @@ impl Memtable {
 
     /// Get current memory usage in bytes
     /// Used to trigger flush to `SSTable`
+    #[inline]
     pub fn size(&self) -> usize {
         self.size.load(Ordering::Relaxed)
     }
 
     /// Get current version (for snapshot creation)
+    #[inline]
     pub fn current_version(&self) -> u64 {
         self.version_counter.current_version()
     }
