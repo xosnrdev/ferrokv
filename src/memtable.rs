@@ -178,8 +178,7 @@ impl Memtable {
         self.size.store(0, Ordering::Relaxed);
     }
 
-    /// Get number of entries
-    #[cfg(test)]
+    /// Get number of entries in memtable
     pub fn len(&self) -> usize {
         self.data.len()
     }

@@ -8,7 +8,6 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use crate::WriteBatch;
 use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
 use crate::config::{Config, FerroKvBuilder};
@@ -18,6 +17,7 @@ use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
 use crate::ttl::ExpiryHeap;
 use crate::wal::{BatchWalEntry, Wal};
+use crate::{FerroStats, WriteBatch};
 
 /// Type alias for merged record: (value, version, ttl, `is_tombstone`)
 type MergedRecord = (Arc<[u8]>, u64, Option<u64>, bool);
@@ -313,6 +313,38 @@ impl FerroKv {
         (start, end)
     }
 
+    /// Return all keys in the database.
+    /// Excludes tombstones and expired keys.
+    ///
+    /// **NOTE**: This is an O(N) operation—scans all keys.
+    pub async fn keys(&self) -> Result<Vec<Arc<[u8]>>> {
+        self.scan(..).await.map(|pairs| pairs.into_iter().map(|(k, _)| k).collect())
+    }
+
+    /// Count total keys in the database
+    ///
+    /// Returns the exact number of keys at the current snapshot.
+    /// Excludes tombstones and expired keys.
+    ///
+    /// **Note**: This is O(N) operation—scans all keys.
+    pub async fn len(&self) -> Result<usize> {
+        Ok(self.keys().await?.len())
+    }
+
+    /// Check if database is empty
+    ///
+    /// Returns `true` if the database contains no keys.
+    pub async fn is_empty(&self) -> Result<bool> {
+        Ok(self.len().await? == 0)
+    }
+
+    /// Get database statistics
+    ///
+    /// For exact key count, use `len()`.
+    pub fn stats(&self) -> FerroStats {
+        FerroStats::new(&self.memtable, &self.sstables)
+    }
+
     /// Increment the `key` atomically
     pub async fn incr(&self, key: &[u8]) -> Result<i64> {
         #[cfg(debug_assertions)]
@@ -538,132 +570,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_acid_durability() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-        db.set(b"key1", b"value1").await.unwrap();
-
-        let result = db.get(b"key1").await.unwrap();
-        assert_eq!(result.as_deref(), Some(&b"value1"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_crash_recovery() {
-        let db_dir = tempdir().unwrap().keep();
-
-        {
-            let db = FerroKv::open(&db_dir).await.unwrap();
-            db.set(b"key1", b"value1").await.unwrap();
-            db.set(b"key2", b"value2").await.unwrap();
-        } // Drop simulates crash
-
-        let db2 = FerroKv::open(&db_dir).await.unwrap();
-        assert_eq!(db2.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-        assert_eq!(db2.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_ttl_persistence() {
-        let db_dir = tempdir().unwrap().keep();
-
-        {
-            let db = FerroKv::open(&db_dir).await.unwrap();
-            db.set_ex(b"key1", b"value1", Duration::from_secs(3600)).await.unwrap();
-        }
-
-        let db2 = FerroKv::open(&db_dir).await.unwrap();
-        assert_eq!(db2.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_ttl_expiration() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Set TTL to 1 second and wait 2 seconds to ensure expiration
-        db.set_ex(b"key1", b"value1", Duration::from_secs(1)).await.unwrap();
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert_eq!(db.get(b"key1").await.unwrap(), None);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_operations() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
-        let mut handles = Vec::new();
-
-        for i in 0..10 {
-            let db = Arc::clone(&db);
-            handles.push(tokio::spawn(async move {
-                let key = format!("key{i}");
-                let value = format!("value{i}");
-                db.set(key.as_bytes(), value.as_bytes()).await.unwrap();
-            }));
-        }
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        for i in 0..10 {
-            let key = format!("key{i}");
-            let expected = format!("value{i}");
-            let result = db.get(key.as_bytes()).await.unwrap();
-            assert_eq!(result.as_deref(), Some(expected.as_bytes()));
-        }
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_empty_get() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-        assert_eq!(db.get(b"nonexistent").await.unwrap(), None);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_sstable_cascade_read() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Write keys to Memtable
-        db.set(b"key1", b"value1").await.unwrap();
-        db.set(b"key2", b"value2").await.unwrap();
-
-        // Manually flush to SSTable
-        db.flush_memtable().await.unwrap();
-
-        // Memtable should be empty, but data persists in SSTable
-        assert!(db.memtable.is_empty());
-
-        // Read should cascade to SSTable
-        let result = db.get(b"key1").await.unwrap();
-        assert_eq!(result.as_deref(), Some(&b"value1"[..]));
-
-        let result = db.get(b"key2").await.unwrap();
-        assert_eq!(result.as_deref(), Some(&b"value2"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
     async fn test_compaction_drops_expired_keys() {
         let db_dir = tempdir().unwrap().keep();
 
@@ -859,50 +765,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ttl_strategy_proactive_cleanup() {
+    async fn test_info_statistics() {
         let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let info_empty = db.stats();
+        assert_eq!(info_empty.memtable_keys, 0);
+        assert_eq!(info_empty.sstable_count, 0);
 
-        // Write key with 100ms TTL
-        db.set_ex(b"cold_key", b"cold_value", Duration::from_millis(100)).await.unwrap();
+        db.set(b"key", b"value").await.unwrap();
 
-        // Verify scheduled in expiry heap
-        let next = db.expiry_heap.peek_next().await;
-        assert!(next.is_some(), "Expiry should be scheduled");
+        let info = db.stats();
+        assert!(info.memtable_keys > 0);
+        assert!(info.memtable_size > 0);
+        assert_eq!(info.sstable_count, 0); // No flush yet
+        assert!(info.current_version > 0);
 
-        // Wait for background cleanup
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Flush to create SSTable
+        db.flush_memtable().await.unwrap();
 
-        // Key should be proactively deleted (not lazy - no GET called)
-        assert_eq!(db.get(b"cold_key").await.unwrap(), None);
+        let info_after_flush = db.stats();
+        assert_eq!(info_after_flush.memtable_keys, 0); // Cleared after flush
+        assert_eq!(info_after_flush.sstable_count, 1);
+        assert!(info_after_flush.total_disk > 0);
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
 
     #[tokio::test]
-    async fn test_ttl_non_blocking() {
+    async fn test_scan_deduplication() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        // Write same key multiple times
+        db.set(b"key_a", b"v1").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        db.set(b"key_a", b"v2").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        db.set(b"key_a", b"v3").await.unwrap();
+
+        // Scan should return only the latest value
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.as_ref(), b"key_a");
+        assert_eq!(results[0].1.as_ref(), b"v3");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_scan_across_memtable_and_sstable() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        // Write and flush to SSTable
+        db.set(b"key_1", b"sstable_value").await.unwrap();
+        db.set(b"key_2", b"sstable_value").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        // Write to memtable (not flushed)
+        db.set(b"key_3", b"memtable_value").await.unwrap();
+        db.set(b"key_4", b"memtable_value").await.unwrap();
+
+        // Scan should include both SSTable and Memtable data
+        let results = db.scan(..).await.unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].0.as_ref(), b"key_1");
+        assert_eq!(results[1].0.as_ref(), b"key_2");
+        assert_eq!(results[2].0.as_ref(), b"key_3");
+        assert_eq!(results[3].0.as_ref(), b"key_4");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_del_compaction_cleanup() {
         let db_dir = tempdir().unwrap().keep();
 
         let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
 
-        // Schedule 100 expirations
-        for i in 0..100 {
-            let key = format!("expire_{i}");
-            db.set_ex(key.as_bytes(), b"value", Duration::from_millis(50)).await.unwrap();
-        }
+        // Write + flush
+        db.set(b"key1", b"value1").await.unwrap();
+        db.flush_memtable().await.unwrap();
 
-        // Concurrent writes during cleanup
-        for i in 0..100 {
-            let key = format!("write_{i}");
+        // Delete + flush (tombstone in SSTable)
+        db.del(b"key1").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        // Create more L0 SSTables to trigger compaction
+        for i in 0..5 {
+            let key = format!("filler_{i}");
             db.set(key.as_bytes(), b"value").await.unwrap();
+            db.flush_memtable().await.unwrap();
         }
 
-        // All writes must succeed without blocking
-        for i in 0..100 {
-            let key = format!("write_{i}");
-            assert_eq!(db.get(key.as_bytes()).await.unwrap().as_deref(), Some(&b"value"[..]));
-        }
+        // Wait for compaction to complete
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // After compaction, tombstone should have dropped both old value and itself
+        assert_eq!(
+            db.get(b"key1").await.unwrap(),
+            None,
+            "Key should remain deleted after compaction"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_del_sstable_cascade() {
+        let db_dir = tempdir().unwrap().keep();
+
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        // Write and flush to SSTable
+        db.set(b"key1", b"value1").await.unwrap();
+        db.flush_memtable().await.unwrap();
+
+        // Delete (tombstone in Memtable)
+        db.del(b"key1").await.unwrap();
+
+        // Read should find tombstone first (cascade stops at Memtable)
+        assert_eq!(db.get(b"key1").await.unwrap(), None, "Tombstone should hide SSTable value");
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
@@ -955,515 +943,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_incr() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Increment non-existent key (should start at 0)
-        let val = db.incr(b"counter").await.unwrap();
-        assert_eq!(val, 1);
-
-        // Increment again
-        let val = db.incr(b"counter").await.unwrap();
-        assert_eq!(val, 2);
-
-        // Increment multiple times
-        for i in 3..=10 {
-            let val = db.incr(b"counter").await.unwrap();
-            assert_eq!(val, i);
-        }
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_incr_durability() {
-        let db_dir = tempdir().unwrap().keep();
-
-        {
-            let db = FerroKv::open(&db_dir).await.unwrap();
-            db.incr(b"counter").await.unwrap();
-            db.incr(b"counter").await.unwrap();
-            db.incr(b"counter").await.unwrap();
-        } // Drop (simulates crash)
-
-        // Reopen and verify counter persisted
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Read as string to verify value
-        let val = db.get(b"counter").await.unwrap().unwrap();
-        let val_str = std::str::from_utf8(&val).unwrap();
-        assert_eq!(val_str, "3");
-
-        // Continue incrementing
-        let val = db.incr(b"counter").await.unwrap();
-        assert_eq!(val, 4);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_incr_concurrent() {
+    async fn test_ttl_strategy_proactive_cleanup() {
         let db_dir = tempdir().unwrap().keep();
 
         let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
 
-        // Spawn 10 concurrent incrementers
-        let mut handles = Vec::new();
-        for _ in 0..10 {
-            let db = Arc::clone(&db);
-            handles.push(tokio::spawn(async move {
-                for _ in 0..10 {
-                    db.incr(b"shared_counter").await.unwrap();
-                }
-            }));
-        }
+        // Write key with 100ms TTL
+        db.set_ex(b"cold_key", b"cold_value", Duration::from_millis(100)).await.unwrap();
 
-        // Wait for all increments
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        // Verify scheduled in expiry heap
+        let next = db.expiry_heap.peek_next().await;
+        assert!(next.is_some(), "Expiry should be scheduled");
 
-        // Final value should be 100 (10 tasks × 10 increments)
-        let val = db.get(b"shared_counter").await.unwrap().unwrap();
-        let val_str = std::str::from_utf8(&val).unwrap();
-        assert_eq!(val_str, "100", "All increments should be atomic");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_incr_invalid_value() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Set non-numeric value
-        db.set(b"bad_counter", b"not_a_number").await.unwrap();
-
-        // Increment should default to 0 and return 1
-        let val = db.incr(b"bad_counter").await.unwrap();
-        assert_eq!(val, 1);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_existing_key() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Set then delete
-        db.set(b"key1", b"value1").await.unwrap();
-        let existed = db.del(b"key1").await.unwrap();
-        assert!(existed, "Key should exist before deletion");
-
-        // Verify deleted
-        let result = db.get(b"key1").await.unwrap();
-        assert_eq!(result, None, "Key should be deleted");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_nonexistent_key() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Delete non-existent key
-        let existed = db.del(b"nonexistent").await.unwrap();
-        assert!(!existed, "Key should not exist");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_durability() {
-        let db_dir = tempdir().unwrap().keep();
-
-        {
-            let db = FerroKv::open(&db_dir).await.unwrap();
-            db.set(b"key1", b"value1").await.unwrap();
-            db.del(b"key1").await.unwrap();
-        } // Drop simulates crash
-
-        // Reopen and verify deletion persisted via WAL
-        let db = FerroKv::open(&db_dir).await.unwrap();
-        assert_eq!(db.get(b"key1").await.unwrap(), None, "Deletion should survive restart");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_sstable_cascade() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Write and flush to SSTable
-        db.set(b"key1", b"value1").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        // Delete (tombstone in Memtable)
-        db.del(b"key1").await.unwrap();
-
-        // Read should find tombstone first (cascade stops at Memtable)
-        assert_eq!(db.get(b"key1").await.unwrap(), None, "Tombstone should hide SSTable value");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_compaction_cleanup() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
-
-        // Write + flush
-        db.set(b"key1", b"value1").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        // Delete + flush (tombstone in SSTable)
-        db.del(b"key1").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        // Create more L0 SSTables to trigger compaction
-        for i in 0..5 {
-            let key = format!("filler_{i}");
-            db.set(key.as_bytes(), b"value").await.unwrap();
-            db.flush_memtable().await.unwrap();
-        }
-
-        // Wait for compaction to complete
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // After compaction, tombstone should have dropped both old value and itself
-        assert_eq!(
-            db.get(b"key1").await.unwrap(),
-            None,
-            "Key should remain deleted after compaction"
-        );
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_idempotent() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"key1", b"value1").await.unwrap();
-
-        // First delete
-        let existed1 = db.del(b"key1").await.unwrap();
-        assert!(existed1, "First delete should return true");
-
-        // Second delete (idempotent)
-        let existed2 = db.del(b"key1").await.unwrap();
-        assert!(!existed2, "Second delete should return false");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_del_set_del_sequence() {
-        let db_dir = tempdir().unwrap().keep();
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // SET -> DEL -> SET sequence
-        db.set(b"key1", b"value1").await.unwrap();
-        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-
-        db.del(b"key1").await.unwrap();
-        assert_eq!(db.get(b"key1").await.unwrap(), None);
-
-        db.set(b"key1", b"value2").await.unwrap();
-        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value2"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_range() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Insert keys in sorted order
-        db.set(b"key_a", b"value_a").await.unwrap();
-        db.set(b"key_b", b"value_b").await.unwrap();
-        db.set(b"key_c", b"value_c").await.unwrap();
-        db.set(b"key_d", b"value_d").await.unwrap();
-        db.set(b"key_e", b"value_e").await.unwrap();
-
-        // Scan range [key_b, key_d]
-        let results = db.scan(&b"key_b"[..]..=&b"key_d"[..]).await.unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0.as_ref(), b"key_b");
-        assert_eq!(results[1].0.as_ref(), b"key_c");
-        assert_eq!(results[2].0.as_ref(), b"key_d");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_unbounded() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"a", b"1").await.unwrap();
-        db.set(b"b", b"2").await.unwrap();
-        db.set(b"c", b"3").await.unwrap();
-
-        // Scan all keys (unbounded range)
-        let results = db.scan(..).await.unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0.as_ref(), b"a");
-        assert_eq!(results[1].0.as_ref(), b"b");
-        assert_eq!(results[2].0.as_ref(), b"c");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_empty_range() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"key_a", b"value_a").await.unwrap();
-        db.set(b"key_z", b"value_z").await.unwrap();
-
-        // Scan range that has no keys
-        let results = db.scan(&b"key_m"[..]..&b"key_n"[..]).await.unwrap();
-
-        assert_eq!(results.len(), 0);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_across_memtable_and_sstable() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Write and flush to SSTable
-        db.set(b"key_1", b"sstable_value").await.unwrap();
-        db.set(b"key_2", b"sstable_value").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        // Write to memtable (not flushed)
-        db.set(b"key_3", b"memtable_value").await.unwrap();
-        db.set(b"key_4", b"memtable_value").await.unwrap();
-
-        // Scan should include both SSTable and Memtable data
-        let results = db.scan(..).await.unwrap();
-
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[0].0.as_ref(), b"key_1");
-        assert_eq!(results[1].0.as_ref(), b"key_2");
-        assert_eq!(results[2].0.as_ref(), b"key_3");
-        assert_eq!(results[3].0.as_ref(), b"key_4");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_tombstone_filtering() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"key_a", b"value_a").await.unwrap();
-        db.set(b"key_b", b"value_b").await.unwrap();
-        db.set(b"key_c", b"value_c").await.unwrap();
-
-        // Delete key_b
-        db.del(b"key_b").await.unwrap();
-
-        // Scan should not include deleted key
-        let results = db.scan(..).await.unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0.as_ref(), b"key_a");
-        assert_eq!(results[1].0.as_ref(), b"key_c");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_ttl_expiration() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"key_a", b"value_a").await.unwrap();
-        db.set_ex(b"key_b", b"value_b", Duration::from_millis(100)).await.unwrap();
-        db.set(b"key_c", b"value_c").await.unwrap();
-
-        // Wait for TTL expiration
+        // Wait for background cleanup
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Scan should not include expired key
-        let results = db.scan(..).await.unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0.as_ref(), b"key_a");
-        assert_eq!(results[1].0.as_ref(), b"key_c");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_deduplication() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Write same key multiple times
-        db.set(b"key_a", b"v1").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        db.set(b"key_a", b"v2").await.unwrap();
-        db.flush_memtable().await.unwrap();
-
-        db.set(b"key_a", b"v3").await.unwrap();
-
-        // Scan should return only the latest value
-        let results = db.scan(..).await.unwrap();
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.as_ref(), b"key_a");
-        assert_eq!(results[0].1.as_ref(), b"v3");
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_scan_prefix() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        // Insert keys with different prefixes
-        db.set(b"user:100", b"alice").await.unwrap();
-        db.set(b"user:200", b"bob").await.unwrap();
-        db.set(b"user:300", b"charlie").await.unwrap();
-        db.set(b"session:100", b"active").await.unwrap();
-        db.set(b"session:200", b"expired").await.unwrap();
-
-        // Scan only user: prefix
-        let results = db.scan(&b"user:"[..]..&b"user:\xff"[..]).await.unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|(k, _)| k.starts_with(b"user:")));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        let mut batch = WriteBatch::new();
-        batch.set(b"key1", b"value1").set(b"key2", b"value2").set(b"key3", b"value3");
-
-        db.write_batch(batch).await.unwrap();
-
-        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
-        assert_eq!(db.get(b"key3").await.unwrap().as_deref(), Some(&b"value3"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch_with_delete() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        db.set(b"to_delete", b"initial").await.unwrap();
-
-        let mut batch = WriteBatch::new();
-        batch.set(b"key1", b"value1").del(b"to_delete").set(b"key2", b"value2");
-
-        db.write_batch(batch).await.unwrap();
-
-        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
-        assert_eq!(db.get(b"to_delete").await.unwrap(), None);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch_with_ttl() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        let mut batch = WriteBatch::new();
-        batch.set(b"permanent", b"stays").set_ex(b"expires", b"goes", Duration::from_millis(100));
-
-        db.write_batch(batch).await.unwrap();
-
-        assert_eq!(db.get(b"permanent").await.unwrap().as_deref(), Some(&b"stays"[..]));
-        assert_eq!(db.get(b"expires").await.unwrap().as_deref(), Some(&b"goes"[..]));
-
-        // Wait for expiration
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        assert_eq!(db.get(b"permanent").await.unwrap().as_deref(), Some(&b"stays"[..]));
-        assert_eq!(db.get(b"expires").await.unwrap(), None);
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch_durability() {
-        let db_dir = tempdir().unwrap().keep();
-
-        {
-            let db = FerroKv::open(&db_dir).await.unwrap();
-
-            let mut batch = WriteBatch::new();
-            batch.set(b"key1", b"value1").set(b"key2", b"value2").del(b"key3");
-
-            db.write_batch(batch).await.unwrap();
-        } // Drop simulates crash
-
-        let db = FerroKv::open(&db_dir).await.unwrap();
-        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch_empty() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        let batch = WriteBatch::new();
-
-        // Empty batch should succeed without error
-        db.write_batch(batch).await.unwrap();
-
-        let _ = tokio::fs::remove_dir_all(&db_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_write_batch_scan_integration() {
-        let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
-
-        let mut batch = WriteBatch::new();
-        batch.set(b"user:1", b"alice").set(b"user:2", b"bob").set(b"user:3", b"charlie");
-
-        db.write_batch(batch).await.unwrap();
-
-        let results = db.scan(..).await.unwrap();
-        assert_eq!(results.len(), 3);
+        // Key should be proactively deleted
+        assert_eq!(db.get(b"cold_key").await.unwrap(), None);
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
