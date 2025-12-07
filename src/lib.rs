@@ -176,6 +176,7 @@ pub(crate) mod helpers;
 pub(crate) mod memtable;
 pub(crate) mod mvcc;
 pub(crate) mod sstable;
+pub(crate) mod stats;
 pub(crate) mod storage;
 pub(crate) mod ttl;
 pub(crate) mod wal;
@@ -183,6 +184,7 @@ pub(crate) mod wal;
 pub use batch::WriteBatch;
 pub use errors::FerroError;
 use mimalloc::MiMalloc;
+pub use stats::FerroStats;
 pub use storage::FerroKv;
 
 #[global_allocator]

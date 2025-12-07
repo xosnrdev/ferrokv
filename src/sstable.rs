@@ -45,7 +45,7 @@ pub struct SSTable {
     index_offset: u64,
     first_key: Arc<[u8]>,
     last_key: Arc<[u8]>,
-    size: u64,
+    pub size: u64,
 }
 
 impl SSTable {

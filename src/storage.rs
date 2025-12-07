@@ -8,7 +8,6 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use crate::WriteBatch;
 use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
 use crate::config::{Config, FerroKvBuilder};
@@ -18,6 +17,7 @@ use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
 use crate::ttl::ExpiryHeap;
 use crate::wal::{BatchWalEntry, Wal};
+use crate::{FerroStats, WriteBatch};
 
 /// Type alias for merged record: (value, version, ttl, `is_tombstone`)
 type MergedRecord = (Arc<[u8]>, u64, Option<u64>, bool);
@@ -311,6 +311,38 @@ impl FerroKv {
         };
 
         (start, end)
+    }
+
+    /// Return all keys in the database.
+    /// Excludes tombstones and expired keys.
+    ///
+    /// **NOTE**: This is an O(N) operation—scans all keys.
+    pub async fn keys(&self) -> Result<Vec<Arc<[u8]>>> {
+        self.scan(..).await.map(|pairs| pairs.into_iter().map(|(k, _)| k).collect())
+    }
+
+    /// Count total keys in the database
+    ///
+    /// Returns the exact number of keys at the current snapshot.
+    /// Excludes tombstones and expired keys.
+    ///
+    /// **Note**: This is O(N) operation—scans all keys.
+    pub async fn len(&self) -> Result<usize> {
+        Ok(self.keys().await?.len())
+    }
+
+    /// Check if database is empty
+    ///
+    /// Returns `true` if the database contains no keys.
+    pub async fn is_empty(&self) -> Result<bool> {
+        Ok(self.len().await? == 0)
+    }
+
+    /// Get database statistics
+    ///
+    /// For exact key count, use `len()`.
+    pub fn stats(&self) -> FerroStats {
+        FerroStats::new(&self.memtable, &self.sstables)
     }
 
     /// Increment the `key` atomically
@@ -1464,6 +1496,128 @@ mod tests {
 
         let results = db.scan(..).await.unwrap();
         assert_eq!(results.len(), 3);
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_keys_returns_all_keys() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        db.set(b"key1", b"value1").await.unwrap();
+        db.set(b"key2", b"value2").await.unwrap();
+        db.set(b"key3", b"value3").await.unwrap();
+
+        let keys = db.keys().await.unwrap();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().any(|k| k.as_ref() == b"key1"));
+        assert!(keys.iter().any(|k| k.as_ref() == b"key2"));
+        assert!(keys.iter().any(|k| k.as_ref() == b"key3"));
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_keys_excludes_tombstones() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        db.set(b"key1", b"value1").await.unwrap();
+        db.set(b"key2", b"value2").await.unwrap();
+        db.del(b"key1").await.unwrap();
+
+        let keys = db.keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].as_ref(), b"key2");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_keys_excludes_expired() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        db.set(b"key1", b"value1").await.unwrap();
+        db.set_ex(b"key2", b"value2", Duration::from_millis(100)).await.unwrap();
+
+        // Wait for expiration
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let keys = db.keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].as_ref(), b"key1");
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_len_accurate_count() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        assert_eq!(db.len().await.unwrap(), 0);
+        assert!(db.is_empty().await.unwrap());
+
+        db.set(b"k1", b"v").await.unwrap();
+        assert_eq!(db.len().await.unwrap(), 1);
+        assert!(!db.is_empty().await.unwrap());
+
+        db.set(b"k2", b"v").await.unwrap();
+        assert_eq!(db.len().await.unwrap(), 2);
+
+        db.del(b"k1").await.unwrap();
+        assert_eq!(db.len().await.unwrap(), 1);
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_len_after_flush() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        // Write to memtable
+        db.set(b"key1", b"value1").await.unwrap();
+        db.set(b"key2", b"value2").await.unwrap();
+
+        // Flush to SSTable
+        db.flush_memtable().await.unwrap();
+
+        // Write new keys to memtable
+        db.set(b"key3", b"value3").await.unwrap();
+
+        // Should count keys from both memtable and SSTable
+        assert_eq!(db.len().await.unwrap(), 3);
+
+        let _ = tokio::fs::remove_dir_all(&db_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_info_statistics() {
+        let db_dir = tempdir().unwrap().keep();
+        let db = FerroKv::open(&db_dir).await.unwrap();
+
+        let info_empty = db.stats();
+        assert_eq!(info_empty.memtable_keys, 0);
+        assert_eq!(info_empty.sstable_count, 0);
+
+        db.set(b"key", b"value").await.unwrap();
+
+        let info = db.stats();
+        assert!(info.memtable_keys > 0);
+        assert!(info.memtable_size > 0);
+        assert_eq!(info.sstable_count, 0); // No flush yet
+        assert!(info.current_version > 0);
+
+        // Flush to create SSTable
+        db.flush_memtable().await.unwrap();
+
+        let info_after_flush = db.stats();
+        assert_eq!(info_after_flush.memtable_keys, 0); // Cleared after flush
+        assert_eq!(info_after_flush.sstable_count, 1);
+        assert!(info_after_flush.total_disk > 0);
 
         let _ = tokio::fs::remove_dir_all(&db_dir).await;
     }
