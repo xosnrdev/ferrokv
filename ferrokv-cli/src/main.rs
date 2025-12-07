@@ -12,7 +12,7 @@ use ferrokv::FerroKv;
 #[command(about, version, styles = CLAP_STYLING)]
 struct Cli {
     /// Path to the database directory
-    #[arg(short, long, default_value = "./ferrokv", value_name = "PATH")]
+    #[arg(long, default_value = "./ferrokv", value_name = "PATH")]
     db: PathBuf,
 
     #[command(subcommand)]
