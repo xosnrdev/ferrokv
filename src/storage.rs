@@ -55,6 +55,11 @@ impl FerroKv {
         Self::open_with_config(path.into(), Config::default()).await
     }
 
+    /// Like `FerroKv::Open` but with preset path as `ferrokv`
+    pub async fn default() -> Result<Self> {
+        Self::open_with_config("ferrokv".into(), Config::default()).await
+    }
+
     /// Builder for custom configuration
     pub fn builder(path: impl Into<PathBuf>) -> FerroKvBuilder {
         FerroKvBuilder::default().path(path.into())
