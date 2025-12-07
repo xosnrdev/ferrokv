@@ -3,6 +3,31 @@ use std::time::Duration;
 use crate::helpers::get_now;
 
 /// A batch of write operations to be executed atomically with a single fsync.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use ferrokv::{FerroKv, WriteBatch};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let db = FerroKv::with_path("./data").await?;
+///     let mut batch = WriteBatch::new();
+///
+///     batch
+///         .set(b"foo:1", b"bar")
+///         .set(b"foo:2", b"baz")
+///         .set_ex(b"foo:3", b"qux", Duration::from_secs(3600))
+///         .del(b"foo:2");
+///
+///     // Execute all operations with a single fsync
+///     db.write_batch(batch).await?;
+///
+///     Ok(())
+/// }
+/// ```
 #[derive(Default)]
 pub struct WriteBatch {
     pub(crate) entries: Vec<BatchEntry>,

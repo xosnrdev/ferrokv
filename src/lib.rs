@@ -15,7 +15,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let db = FerroKv::open("./data").await?;
+//!     let db = FerroKv::with_path("./data").await?;
 //!
 //!     // Write
 //!     db.set(b"user:100", b"Alice").await?;
@@ -54,7 +54,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let db = FerroKv::open("./data").await?;
+//!     let db = FerroKv::with_path("./data").await?;
 //!
 //!     // Collect multiple writes into a batch
 //!     let mut batch = WriteBatch::new();
@@ -102,16 +102,20 @@
 //! Tune memory and compaction thresholds:
 //!
 //! ```no_run
-//! # use ferrokv::FerroKv;
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = FerroKv::builder("./data")
-//!     .memtable_size(128 * 1024 * 1024) // 128MB memtable
-//!     .l0_compaction_threshold(8) // Compact after 8 files
-//!     .sstable_size(8 * 1024 * 1024) // 8MB SSTable files
-//!     .open()
-//!     .await?;
-//! # Ok(())
-//! # }
+//! use ferrokv::Builder;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let db = Builder::new()
+//!         .path("./data")
+//!         .memtable_size(128 * 1024 * 1024) // 128MB memtable
+//!         .l0_compaction_threshold(8) // Compact after 8 files
+//!         .sstable_size(8 * 1024 * 1024) // 8MB SSTable files
+//!         .build()
+//!         .await?;
+//!
+//!     Ok(())
+//! }
 //! ```
 //!
 //! ## Examples
@@ -130,19 +134,22 @@
 //! All operations return `Result<T, FerroError>`:
 //!
 //! ```no_run
-//! # use ferrokv::{FerroKv, FerroError};
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = FerroKv::open("./data").await?;
+//! use ferrokv::{FerroError, FerroKv};
 //!
-//! match db.get(b"key").await {
-//!     Ok(Some(value)) => println!("Found: {:?}", value),
-//!     Ok(None) => println!("Not found"),
-//!     Err(FerroError::Io(e)) => eprintln!("I/O error: {e}"),
-//!     Err(FerroError::Corruption(msg)) => eprintln!("Data corruption: {msg}"),
-//!     Err(FerroError::InvalidData(msg)) => eprintln!("Invalid data: {msg}"),
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let db = FerroKv::with_path("./data").await?;
+//!
+//!     match db.get(b"key").await {
+//!         Ok(Some(value)) => println!("Found: {:?}", value),
+//!         Ok(None) => println!("Not found"),
+//!         Err(FerroError::Io(e)) => eprintln!("I/O error: {e}"),
+//!         Err(FerroError::Corruption(msg)) => eprintln!("Data corruption: {msg}"),
+//!         Err(FerroError::InvalidData(msg)) => eprintln!("Invalid data: {msg}"),
+//!     }
+//!
+//!     Ok(())
 //! }
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## Architecture
@@ -182,9 +189,10 @@ pub(crate) mod ttl;
 pub(crate) mod wal;
 
 pub use batch::WriteBatch;
+pub use config::Builder;
 pub use errors::FerroError;
 use mimalloc::MiMalloc;
-pub use stats::FerroStats;
+pub use stats::Stats;
 pub use storage::FerroKv;
 
 #[global_allocator]

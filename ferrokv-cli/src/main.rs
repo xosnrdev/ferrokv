@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,7 +50,7 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let db = FerroKv::open(&cli.db)
+    let db = FerroKv::with_path(&cli.db)
         .await
         .with_context(|| format!("Failed to open database at '{}'", cli.db.display()))?;
 
@@ -119,8 +120,8 @@ fn display_pairs(keys_only: bool, pairs: Pairs) {
     println!("{table}");
 }
 
-fn format_bytes(v: &[u8]) -> &str {
-    unsafe { str::from_utf8_unchecked(v) }
+fn format_bytes(v: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(v)
 }
 
 #[test]

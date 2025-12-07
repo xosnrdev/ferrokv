@@ -61,7 +61,7 @@ use ferrokv::FerroKv;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open the database at the given directory
     // with default settings (creates ./data/ directory if missing)
-    let db = FerroKv::open("./data").await?;
+    let db = FerroKv::with_path("./data").await?;
 
     // 2. Standard Key-Value ops
     db.set(b"user:101", b"Alice").await?;
@@ -98,7 +98,7 @@ use ferrokv::{FerroKv, WriteBatch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = FerroKv::open("./data").await?;
+    let db = FerroKv::with_path("./data").await?;
 
     // Collect multiple writes into a batch
     let mut batch = WriteBatch::new();

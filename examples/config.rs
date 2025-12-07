@@ -1,4 +1,4 @@
-use ferrokv::FerroKv;
+use ferrokv::Builder;
 use tempfile::tempdir;
 
 #[tokio::main]
@@ -7,11 +7,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_dir = tempdir()?.keep();
 
     // Open database with custom configuration
-    let db = FerroKv::builder(&db_dir)
+    let db = Builder::new()
+        .path(&db_dir)
         .memtable_size(128 * 1024 * 1024)
         .l0_compaction_threshold(8)
         .sstable_size(8 * 1024 * 1024)
-        .open()
+        .build()
         .await?;
 
     db.set(b"foo", b"bar").await?;

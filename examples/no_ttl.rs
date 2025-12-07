@@ -6,7 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: Using a temporary directory for demonstration.
     let db_dir = tempdir()?.keep();
 
-    let db = FerroKv::open(&db_dir).await?;
+    let db = FerroKv::with_path(&db_dir).await?;
 
     // Write KVs
     db.set(b"foo", b"bar").await?;
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(db);
 
     // Read persisted data
-    let db = FerroKv::open(&db_dir).await?;
+    let db = FerroKv::with_path(&db_dir).await?;
     if let Some(value) = db.get(b"foo").await? {
         println!("foo = {}", String::from_utf8_lossy(&value));
     }
