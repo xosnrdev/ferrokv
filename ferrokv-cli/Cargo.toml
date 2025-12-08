@@ -3,6 +3,10 @@ name = "ferrokv-cli"
 version = "1.0.0"
 edition = "2024"
 description = "The command-line interface for Ferrokv."
+repository = "https://github.com/xosnrdev/ferrokv"
+categories = ["command-line-utilities", "development-tools", "database-implementations"]
+keywords = ["cli", "ferrokv"]
+license = "MIT"
 
 [[bin]]
 name = "ferrokv"
