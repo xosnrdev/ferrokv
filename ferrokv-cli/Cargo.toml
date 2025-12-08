@@ -13,9 +13,9 @@ anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["clap"] }
 comfy-table = "7.2.1"
-ferrokv = { path = "../" }
+ferrokv = "1.0.3"
 tokio = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies.ferrokv]
-path = "../"
+version = "1.0.3"
 features = ["io-uring"]
