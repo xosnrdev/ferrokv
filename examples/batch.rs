@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: Using a temporary directory for demonstration.
     let db_dir = tempdir()?.keep();
 
-    let db = FerroKv::open(&db_dir).await?;
+    let db = FerroKv::with_path(&db_dir).await?;
 
     let mut batch = WriteBatch::new();
     batch

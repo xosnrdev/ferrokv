@@ -10,14 +10,14 @@ use tokio::sync::Mutex;
 
 use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
-use crate::config::{Config, FerroKvBuilder};
+use crate::config::{Builder, Config};
 use crate::errors::Result;
-use crate::helpers::get_now;
+use crate::helpers::{DB_PATH, get_now};
 use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
 use crate::ttl::ExpiryHeap;
 use crate::wal::{BatchWalEntry, Wal};
-use crate::{FerroStats, WriteBatch};
+use crate::{Stats, WriteBatch};
 
 /// Type alias for merged record: (value, version, ttl, `is_tombstone`)
 type MergedRecord = (Arc<[u8]>, u64, Option<u64>, bool);
@@ -40,6 +40,25 @@ pub struct FerroKv {
 }
 
 impl FerroKv {
+    /// Open database with default configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ferrokv::FerroKv;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let db = FerroKv::new().await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// For custom configuration, see [`Builder::new()`]
+    pub async fn new() -> Result<Self> {
+        Self::with_config(DB_PATH.into(), Config::default()).await
+    }
+
     /// Open database with default configuration
     ///
     /// For custom configuration call the builder method:
@@ -51,22 +70,40 @@ impl FerroKv {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "1.0.2", note = "Use `FerroKv::with_path` instead")]
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::open_with_config(path.into(), Config::default()).await
+        Self::with_config(path.into(), Config::default()).await
     }
 
-    /// Like `FerroKv::Open` but with preset path as `ferrokv`
-    pub async fn default() -> Result<Self> {
-        Self::open_with_config("ferrokv".into(), Config::default()).await
+    /// Open database with the specified directory path.
+    ///
+    /// Uses the same default configuration as `FerroKv::new()`
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ferrokv::FerroKv;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let db = FerroKv::with_path("./data").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// For custom configuration, see [`Builder::new()`]
+    pub async fn with_path(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::with_config(path.into(), Config::default()).await
     }
 
     /// Builder for custom configuration
-    pub fn builder(path: impl Into<PathBuf>) -> FerroKvBuilder {
-        FerroKvBuilder::default().path(path.into())
+    #[deprecated(since = "1.0.2", note = "Use `Builder::new().path(..)` instead")]
+    pub fn builder(path: impl Into<PathBuf>) -> Builder {
+        Builder::default().path(path)
     }
 
     /// Open database with configuration
-    pub(crate) async fn open_with_config(path: PathBuf, config: Config) -> Result<Self> {
+    pub(crate) async fn with_config(path: PathBuf, config: Config) -> Result<Self> {
         tokio::fs::create_dir_all(&path).await?;
         let wal_path = path.join("wal.log");
 
@@ -346,8 +383,8 @@ impl FerroKv {
     /// Get database statistics
     ///
     /// For exact key count, use `len()`.
-    pub fn stats(&self) -> FerroStats {
-        FerroStats::new(&self.memtable, &self.sstables)
+    pub fn stats(&self) -> Stats {
+        Stats::new(&self.memtable, &self.sstables)
     }
 
     /// Increment the `key` atomically
@@ -398,20 +435,22 @@ impl FerroKv {
     ///
     /// use ferrokv::{FerroKv, WriteBatch};
     ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let db = FerroKv::open("./data").await?;
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let db = FerroKv::with_path("./data").await?;
     ///
-    /// let mut batch = WriteBatch::new();
-    /// batch
-    ///     .set(b"foo:1", b"bar")
-    ///     .set(b"foo:2", b"baz")
-    ///     .set_ex(b"foo:3", b"qux", Duration::from_secs(3600))
-    ///     .del(b"foo:2");
+    ///     let mut batch = WriteBatch::new();
+    ///     batch
+    ///         .set(b"foo:1", b"bar")
+    ///         .set(b"foo:2", b"baz")
+    ///         .set_ex(b"foo:3", b"qux", Duration::from_secs(3600))
+    ///         .del(b"foo:2");
     ///
-    /// // Single fsync for all 4 operations
-    /// db.write_batch(batch).await?;
-    /// # Ok(())
-    /// # }
+    ///     // Single fsync for all 4 operations
+    ///     db.write_batch(batch).await?;
+    ///
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         if batch.is_empty() {
@@ -578,7 +617,7 @@ mod tests {
     async fn test_compaction_drops_expired_keys() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Write 100 keys with TTL=1 second (will expire)
         for i in 0..100 {
@@ -631,7 +670,7 @@ mod tests {
     async fn test_compaction_reduces_read_amplification() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Create 10 L0 SSTables
         for batch in 0..10 {
@@ -665,7 +704,7 @@ mod tests {
     async fn test_compaction_deduplication() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Write same key 3 times with different values
         db.set(b"key1", b"v1").await.unwrap();
@@ -701,7 +740,7 @@ mod tests {
     async fn test_compaction_non_blocking_writes() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Create L0 SSTables to trigger compaction
         for i in 0..6 {
@@ -731,7 +770,7 @@ mod tests {
     async fn test_compaction_concurrent_reads() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Create data
         for i in 0..50 {
@@ -772,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn test_info_statistics() {
         let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
 
         let info_empty = db.stats();
         assert_eq!(info_empty.memtable_keys, 0);
@@ -800,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_deduplication() {
         let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
 
         // Write same key multiple times
         db.set(b"key_a", b"v1").await.unwrap();
@@ -824,7 +863,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_across_memtable_and_sstable() {
         let db_dir = tempdir().unwrap().keep();
-        let db = FerroKv::open(&db_dir).await.unwrap();
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
 
         // Write and flush to SSTable
         db.set(b"key_1", b"sstable_value").await.unwrap();
@@ -851,7 +890,7 @@ mod tests {
     async fn test_del_compaction_cleanup() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Write + flush
         db.set(b"key1", b"value1").await.unwrap();
@@ -885,7 +924,7 @@ mod tests {
     async fn test_del_sstable_cascade() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = FerroKv::open(&db_dir).await.unwrap();
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
 
         // Write and flush to SSTable
         db.set(b"key1", b"value1").await.unwrap();
@@ -906,7 +945,7 @@ mod tests {
 
         // Write data and flush to SSTable
         {
-            let db = FerroKv::open(&db_dir).await.unwrap();
+            let db = FerroKv::with_path(&db_dir).await.unwrap();
 
             // Write enough data to force flush
             for i in 0..100 {
@@ -925,7 +964,7 @@ mod tests {
 
         // Reopen database and verify SSTable data is loaded
         {
-            let db = FerroKv::open(&db_dir).await.unwrap();
+            let db = FerroKv::with_path(&db_dir).await.unwrap();
 
             // Verify SSTables were loaded
             let sstables = db.sstables.load();
@@ -951,7 +990,7 @@ mod tests {
     async fn test_ttl_strategy_proactive_cleanup() {
         let db_dir = tempdir().unwrap().keep();
 
-        let db = Arc::new(FerroKv::open(&db_dir).await.unwrap());
+        let db = Arc::new(FerroKv::with_path(&db_dir).await.unwrap());
 
         // Write key with 100ms TTL
         db.set_ex(b"cold_key", b"cold_value", Duration::from_millis(100)).await.unwrap();

@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_dir = tempdir()?.keep();
 
     // Open database with default configuration
-    let db = FerroKv::open(&db_dir).await?;
+    let db = FerroKv::with_path(&db_dir).await?;
 
     // Write with TTL
     db.set_ex(b"foo", b"bar", Duration::from_secs(5)).await?;

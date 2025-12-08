@@ -34,8 +34,8 @@ fn write_throughput(c: &mut Criterion) {
     let rt = create_runtime();
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let db =
-        rt.block_on(async { FerroKv::open(temp_dir.path()).await.expect("Failed to open db") });
+    let db = rt
+        .block_on(async { FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db") });
     let db = Arc::new(db);
     let value = generate_value();
 
@@ -70,7 +70,7 @@ fn read_throughput(c: &mut Criterion) {
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db = rt.block_on(async {
-        let db = FerroKv::open(temp_dir.path()).await.expect("Failed to open db");
+        let db = FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db");
         let value = generate_value();
 
         // Insert keys that will be in memtable
@@ -136,8 +136,9 @@ fn ttl_overhead(c: &mut Criterion) {
     // Benchmark: set without TTL (baseline)
     {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let db =
-            rt.block_on(async { FerroKv::open(temp_dir.path()).await.expect("Failed to open db") });
+        let db = rt.block_on(async {
+            FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db")
+        });
         let db = Arc::new(db);
         let counter = AtomicU64::new(0);
         let value = value.clone();
@@ -161,8 +162,9 @@ fn ttl_overhead(c: &mut Criterion) {
     // Benchmark: set_ex with TTL (measure overhead)
     {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let db =
-            rt.block_on(async { FerroKv::open(temp_dir.path()).await.expect("Failed to open db") });
+        let db = rt.block_on(async {
+            FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db")
+        });
         let db = Arc::new(db);
         let counter = AtomicU64::new(0);
         let value = value.clone();
@@ -203,7 +205,7 @@ fn batch_vs_individual(c: &mut Criterion) {
         {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let db = rt.block_on(async {
-                FerroKv::open(temp_dir.path()).await.expect("Failed to open db")
+                FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db")
             });
             let db = Arc::new(db);
             let value = value.clone();
@@ -233,7 +235,7 @@ fn batch_vs_individual(c: &mut Criterion) {
         {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let db = rt.block_on(async {
-                FerroKv::open(temp_dir.path()).await.expect("Failed to open db")
+                FerroKv::with_path(temp_dir.path()).await.expect("Failed to open db")
             });
             let db = Arc::new(db);
             let value = value.clone();

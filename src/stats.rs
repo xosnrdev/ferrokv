@@ -5,8 +5,8 @@ use arc_swap::ArcSwap;
 use crate::memtable::Memtable;
 use crate::sstable::SSTable;
 
-/// Ferrokv statistics and metadata
-pub struct FerroStats {
+/// `FerroKv` statistics and metadata
+pub struct Stats {
     /// Number of entries in memtable
     pub memtable_keys: usize,
 
@@ -23,7 +23,7 @@ pub struct FerroStats {
     pub current_version: u64,
 }
 
-impl FerroStats {
+impl Stats {
     pub(crate) fn new(memtable: &Memtable, sstables: &Arc<ArcSwap<Vec<Arc<SSTable>>>>) -> Self {
         let memtable_keys = memtable.len();
         let memtable_size = memtable.size();

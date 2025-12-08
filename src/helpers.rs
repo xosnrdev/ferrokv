@@ -12,6 +12,9 @@ pub const FOOTER_MAGIC: u32 = 0xFE77_0557;
 /// Footer size: `filter_offset(8)` + `index_offset(8)` + magic(4)
 pub const FOOTER_SIZE: usize = 20;
 
+/// Default database path
+pub const DB_PATH: &str = "./ferrokv";
+
 pub fn get_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
