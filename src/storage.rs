@@ -109,17 +109,24 @@ impl FerroKv {
 
         let recovered_entries = Wal::recover(&wal_path).await?;
         let memtable = Arc::new(Memtable::default());
+        let expiry_heap = Arc::new(ExpiryHeap::default());
 
         // Tracks max version during recovery for version counter restoration
         let mut max_version = 0;
 
-        for entry in recovered_entries {
+        for entry in &recovered_entries {
             let version = if entry.is_tombstone {
                 memtable.insert_tombstone(&entry.key)
             } else {
                 memtable.insert(&entry.key, &entry.value, entry.ttl)
             };
             max_version = max_version.max(version);
+
+            // Restore TTL tracking for proactive cleanup
+            if let Some(expire_at) = entry.ttl {
+                let key: Arc<[u8]> = entry.key.to_vec().into();
+                expiry_heap.schedule(key, expire_at).await;
+            }
         }
 
         // Restore version counter to continue from max recovered version
@@ -129,9 +136,6 @@ impl FerroKv {
                 let _ = memtable.next_version();
             }
         }
-
-        let mut wal = Wal::new(wal_path).await?;
-        wal.truncate().await?;
 
         // Scan existing .sst files and load metadata
         let mut sstables = Vec::new();
@@ -154,12 +158,43 @@ impl FerroKv {
             }
         }
 
+        // Flush recovered data to SSTable before truncating WAL
+        if !recovered_entries.is_empty() {
+            let sst_id = max_sst_id + 1;
+            let sst = SSTable::flush(&path, &memtable, 0, sst_id).await?;
+            sstables.push(sst);
+            max_sst_id = sst_id;
+            memtable.clear();
+        }
+
         // Sort SSTables by level and ID for optimal read performance
         sstables.sort_by(|a, b| a.level().cmp(&b.level()).then_with(|| a.id().cmp(&b.id())));
 
+        // Restore version counter from existing SSTables if no WAL entries
+        if max_version == 0 && !sstables.is_empty() {
+            for sst in &sstables {
+                // Scan all records in SSTable to find maximum version
+                let all_records =
+                    sst.scan_range(&(Bound::Unbounded, Bound::Unbounded), u64::MAX).await?;
+                for record in all_records {
+                    max_version = max_version.max(record.version);
+                }
+            }
+
+            // Restore version counter
+            if max_version > 0 {
+                let current = memtable.current_version();
+                for _ in current..max_version {
+                    let _ = memtable.next_version();
+                }
+            }
+        }
+
+        let mut wal = Wal::new(wal_path).await?;
+        wal.truncate().await?;
+
         let sstables = Arc::new(ArcSwap::from_pointee(sstables));
         let next_sst_id = Arc::new(AtomicU64::new(max_sst_id + 1));
-        let expiry_heap = Arc::new(ExpiryHeap::default());
 
         let db = Self {
             wal: Mutex::new(wal),
