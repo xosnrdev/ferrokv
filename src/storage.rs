@@ -174,8 +174,7 @@ impl FerroKv {
         if max_version == 0 && !sstables.is_empty() {
             for sst in &sstables {
                 // Scan all records in SSTable to find maximum version
-                let all_records =
-                    sst.scan_range(&(Bound::Unbounded, Bound::Unbounded), u64::MAX).await?;
+                let all_records = sst.scan_range(&(Bound::Unbounded, Bound::Unbounded), 0).await?;
                 for record in all_records {
                     max_version = max_version.max(record.version);
                 }
