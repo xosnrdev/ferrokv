@@ -5,33 +5,78 @@ use ferrokv::{FerroKv, WriteBatch};
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn test_crash_recovery() {
+async fn test_multi_restart_durability() {
+    let db_dir = tempdir().unwrap().keep();
+
+    // First write
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        db.set(b"key1", b"value1").await.unwrap();
+        db.set(b"key2", b"value2").await.unwrap();
+    }
+
+    // First restart
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
+        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
+    }
+
+    // Second restart
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        assert_eq!(db.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
+        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
+
+        let pairs = db.scan(..).await.unwrap();
+        assert_eq!(pairs.len(), 2, "Scan should return both keys after restart");
+    }
+
+    let _ = tokio::fs::remove_dir_all(&db_dir).await;
+}
+
+#[tokio::test]
+async fn test_ttl_recovery() {
+    let db_dir = tempdir().unwrap().keep();
+
+    // Write with 10-second TTL
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        db.set_ex(b"temp_key", b"temp_value", Duration::from_secs(10)).await.unwrap();
+    }
+
+    // Restart immediately
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        assert_eq!(db.get(b"temp_key").await.unwrap().as_deref(), Some(&b"temp_value"[..]));
+
+        // Wait for expiration
+        tokio::time::sleep(Duration::from_secs(11)).await;
+
+        // Key should be expired
+        assert_eq!(db.get(b"temp_key").await.unwrap(), None);
+    }
+
+    let _ = tokio::fs::remove_dir_all(&db_dir).await;
+}
+
+#[tokio::test]
+async fn test_recovery_with_deletions() {
     let db_dir = tempdir().unwrap().keep();
 
     {
         let db = FerroKv::with_path(&db_dir).await.unwrap();
         db.set(b"key1", b"value1").await.unwrap();
         db.set(b"key2", b"value2").await.unwrap();
-    } // Drop simulates crash
+        db.del(b"key1").await.unwrap();
+    }
 
-    let db2 = FerroKv::with_path(&db_dir).await.unwrap();
-    assert_eq!(db2.get(b"key1").await.unwrap().as_deref(), Some(&b"value1"[..]));
-    assert_eq!(db2.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
-
-    let _ = tokio::fs::remove_dir_all(&db_dir).await;
-}
-
-#[tokio::test]
-async fn test_ttl_expiration() {
-    let db_dir = tempdir().unwrap().keep();
-
-    let db = FerroKv::with_path(&db_dir).await.unwrap();
-
-    // Set TTL to 1 second and wait 2 seconds to ensure expiration
-    db.set_ex(b"key1", b"value1", Duration::from_secs(1)).await.unwrap();
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(db.get(b"key1").await.unwrap(), None);
+    // After restart, deletion should persist
+    {
+        let db = FerroKv::with_path(&db_dir).await.unwrap();
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+        assert_eq!(db.get(b"key2").await.unwrap().as_deref(), Some(&b"value2"[..]));
+    }
 
     let _ = tokio::fs::remove_dir_all(&db_dir).await;
 }
@@ -156,23 +201,6 @@ async fn test_incr_invalid_value() {
     // Increment should default to 0 and return 1
     let val = db.incr(b"bad_counter").await.unwrap();
     assert_eq!(val, 1);
-
-    let _ = tokio::fs::remove_dir_all(&db_dir).await;
-}
-
-#[tokio::test]
-async fn test_del_durability() {
-    let db_dir = tempdir().unwrap().keep();
-
-    {
-        let db = FerroKv::with_path(&db_dir).await.unwrap();
-        db.set(b"key1", b"value1").await.unwrap();
-        db.del(b"key1").await.unwrap();
-    } // Drop simulates crash
-
-    // Reopen and verify deletion persisted via WAL
-    let db = FerroKv::with_path(&db_dir).await.unwrap();
-    assert_eq!(db.get(b"key1").await.unwrap(), None, "Deletion should survive restart");
 
     let _ = tokio::fs::remove_dir_all(&db_dir).await;
 }
