@@ -132,7 +132,7 @@ impl FerroKv {
         // Restore version counter to continue from max recovered version
         if max_version > 0 {
             let current = memtable.current_version();
-            for _ in current..max_version {
+            for _ in current..=max_version {
                 let _ = memtable.next_version();
             }
         }
@@ -183,7 +183,7 @@ impl FerroKv {
             // Restore version counter
             if max_version > 0 {
                 let current = memtable.current_version();
-                for _ in current..max_version {
+                for _ in current..=max_version {
                     let _ = memtable.next_version();
                 }
             }
