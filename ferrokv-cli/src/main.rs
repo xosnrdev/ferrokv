@@ -41,7 +41,7 @@ enum Commands {
         count: bool,
 
         /// Show only keys excluding values
-        #[arg(long)]
+        #[arg(long, conflicts_with = "count")]
         keys_only: bool,
     },
 }
