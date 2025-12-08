@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrokv::{FerroKv, WriteBatch};
+use ferrokv::{FerroError, FerroKv, WriteBatch};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -486,6 +486,25 @@ async fn test_len_accurate_count() {
 
     db.del(b"k1").await.unwrap();
     assert_eq!(db.len().await.unwrap(), 1);
+
+    let _ = tokio::fs::remove_dir_all(&db_dir).await;
+}
+
+#[tokio::test]
+async fn test_exclusive_lock_prevents_multi_process() {
+    let db_dir = tempdir().unwrap().keep();
+
+    // First process opens database successfully
+    let db1 = FerroKv::with_path(&db_dir).await.unwrap();
+
+    // Second process attempt should fail with Locked error
+    let db2 = FerroKv::with_path(&db_dir).await;
+    assert!(db2.is_err_and(|err| matches!(err, FerroError::Locked(_))));
+
+    // After first process closes, second can open
+    drop(db1);
+    let db3 = FerroKv::with_path(&db_dir).await;
+    assert!(db3.is_ok());
 
     let _ = tokio::fs::remove_dir_all(&db_dir).await;
 }

@@ -146,6 +146,7 @@
 //!         Err(FerroError::Io(e)) => eprintln!("I/O error: {e}"),
 //!         Err(FerroError::Corruption(msg)) => eprintln!("Data corruption: {msg}"),
 //!         Err(FerroError::InvalidData(msg)) => eprintln!("Invalid data: {msg}"),
+//!         Err(FerroError::Locked(msg)) => eprintln!("Database locked: {msg}"),
 //!     }
 //!
 //!     Ok(())

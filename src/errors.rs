@@ -7,6 +7,7 @@ pub enum FerroError {
     Io(io::Error),
     Corruption(Cow<'static, str>),
     InvalidData(Cow<'static, str>),
+    Locked(Cow<'static, str>),
 }
 
 impl fmt::Display for FerroError {
@@ -15,6 +16,7 @@ impl fmt::Display for FerroError {
             FerroError::Io(err) => write!(f, "I/O error: {err}"),
             FerroError::Corruption(msg) => write!(f, "Data corruption: {msg}"),
             FerroError::InvalidData(msg) => write!(f, "Invalid data: {msg}"),
+            FerroError::Locked(msg) => write!(f, "Database locked: {msg}"),
         }
     }
 }

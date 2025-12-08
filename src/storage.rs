@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
 use crate::config::{Builder, Config};
-use crate::errors::Result;
+use crate::errors::{FerroError, Result};
 use crate::helpers::{DB_PATH, get_now};
 use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
@@ -37,6 +37,7 @@ pub struct FerroKv {
     expiry_heap: Arc<ExpiryHeap>,
     incr_lock: Mutex<()>,
     config: Arc<Config>,
+    _lock_file: std::fs::File,
 }
 
 impl FerroKv {
@@ -105,6 +106,19 @@ impl FerroKv {
     /// Open database with configuration
     pub(crate) async fn with_config(path: PathBuf, config: Config) -> Result<Self> {
         tokio::fs::create_dir_all(&path).await?;
+
+        // Acquire exclusive lock to prevent multi-process corruption
+        let lock_path = path.join(".ferrokv.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        lock_file.try_lock().map_err(|_| {
+            FerroError::Locked("Ferrokv is already open in another process.".into())
+        })?;
+
         let wal_path = path.join("wal.log");
 
         let recovered_entries = Wal::recover(&wal_path).await?;
@@ -170,6 +184,7 @@ impl FerroKv {
             expiry_heap: Arc::clone(&expiry_heap),
             incr_lock: Mutex::new(()),
             config: Arc::new(config),
+            _lock_file: lock_file,
         };
 
         // Spawn background expiry cleanup task
