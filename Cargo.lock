@@ -370,7 +370,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "ferrokv"
-version = "1.0.3"
+version = "1.0.31"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -385,22 +385,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrokv"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2d308907bfea10ca01d28e6f61929e2224c5b837ae0cdf3da982b8080816e5"
-dependencies = [
- "arc-swap",
- "bytes",
- "crc32fast",
- "crossbeam-skiplist",
- "memmap2",
- "mimalloc",
- "tokio",
- "twox-hash",
-]
-
-[[package]]
 name = "ferrokv-cli"
 version = "1.0.0"
 dependencies = [
@@ -408,7 +392,7 @@ dependencies = [
  "clap",
  "clap-cargo",
  "comfy-table",
- "ferrokv 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ferrokv",
  "tokio",
 ]
 
