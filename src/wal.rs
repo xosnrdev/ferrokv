@@ -77,7 +77,6 @@ impl WalEntry {
 /// Write-Ahead Log (WAL) for durability
 pub struct Wal {
     file: File,
-    path: PathBuf,
     offset: u64,
     write_buf: Vec<u8>,
 }
@@ -89,7 +88,7 @@ impl Wal {
 
         let metadata = file.metadata().await?;
         let offset = metadata.len();
-        Ok(Self { file, path, offset, write_buf: Vec::new() })
+        Ok(Self { file, offset, write_buf: Vec::new() })
     }
 
     /// Append an entry to the WAL with durability guarantee
@@ -232,18 +231,11 @@ impl Wal {
 
     /// Truncate WAL (to be called after Memtable flush to `SSTable`)
     pub async fn truncate(&mut self) -> Result<()> {
-        // Close current file
-        drop(std::mem::replace(
-            &mut self.file,
-            OpenOptions::new().write(true).open(&self.path).await?,
-        ));
-
-        // Remove old WAL
-        tokio::fs::remove_file(&self.path).await?;
-
-        // Create new empty WAL
-        self.file =
-            OpenOptions::new().create(true).write(true).append(true).open(&self.path).await?;
+        // Truncate file in place without reopening to preserve inode
+        // This keeps the same file descriptor, preventing background tasks
+        // with Arc clones from losing the file reference
+        self.file.set_len(0).await?;
+        self.file.sync_all().await?;
 
         self.offset = 0;
         self.write_buf.clear();
