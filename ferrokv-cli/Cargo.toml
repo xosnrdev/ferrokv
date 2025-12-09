@@ -1,6 +1,6 @@
 [package]
 name = "ferrokv-cli"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "The command-line interface for Ferrokv."
 repository = "https://github.com/xosnrdev/ferrokv"
@@ -17,9 +17,9 @@ anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["clap"] }
 comfy-table = "7.2.1"
-ferrokv = { path = "../" }
+ferrokv = "1.0.31"
 tokio = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies.ferrokv]
-path = "../"
+version = "1.0.31"
 features = ["io-uring"]

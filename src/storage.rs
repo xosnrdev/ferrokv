@@ -107,7 +107,7 @@ impl FerroKv {
         if config.read_only {
             if !tokio::fs::try_exists(&path).await? {
                 return Err(FerroError::InvalidData(
-                    format!("Database path '{}' does not exist", path.display()).into(),
+                    format!("Database path `{}` does not exist", path.display()).into(),
                 ));
             }
         } else {
