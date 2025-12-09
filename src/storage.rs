@@ -132,11 +132,11 @@ impl FerroKv {
             max_version = max_version.max(version);
 
             // Restore TTL tracking for proactive cleanup
-            if !config.read_only {
-                if let Some(expire_at) = entry.ttl {
-                    let key: Arc<[u8]> = entry.key.to_vec().into();
-                    expiry_heap.schedule(key, expire_at).await;
-                }
+            if !config.read_only
+                && let Some(expire_at) = entry.ttl
+            {
+                let key: Arc<[u8]> = entry.key.to_vec().into();
+                expiry_heap.schedule(key, expire_at).await;
             }
         }
 
