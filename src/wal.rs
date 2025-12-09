@@ -99,6 +99,15 @@ impl Wal {
         Ok(Self { file, offset, write_buf: Vec::new() })
     }
 
+    /// Open an existing WAL file in read-only mode
+    pub async fn readonly(path: PathBuf) -> Result<Self> {
+        let file = OpenOptions::new().read(true).open(&path).await?;
+
+        let metadata = file.metadata().await?;
+        let offset = metadata.len();
+        Ok(Self { file, offset, write_buf: Vec::new() })
+    }
+
     /// Append an entry to the WAL with durability guarantee
     /// CRITICAL: Does not return until `sync_data()` completes
     pub async fn append(&mut self, key: &[u8], value: &[u8], ttl: Option<u64>) -> Result<()> {

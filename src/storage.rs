@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::batch::BatchEntry;
 use crate::compaction::merge_sstables;
 use crate::config::{Builder, Config};
-use crate::errors::Result;
+use crate::errors::{FerroError, Result};
 use crate::helpers::{DB_PATH, get_now};
 use crate::memtable::{LookupResult, Memtable};
 use crate::sstable::SSTable;
@@ -104,7 +104,16 @@ impl FerroKv {
 
     /// Open database with configuration
     pub(crate) async fn with_config(path: PathBuf, config: Config) -> Result<Self> {
-        tokio::fs::create_dir_all(&path).await?;
+        if config.read_only {
+            if !tokio::fs::try_exists(&path).await? {
+                return Err(FerroError::InvalidData(
+                    format!("Database path '{}' does not exist", path.display()).into(),
+                ));
+            }
+        } else {
+            tokio::fs::create_dir_all(&path).await?;
+        }
+
         let wal_path = path.join("wal.log");
 
         let recovered_entries = Wal::recover(&wal_path).await?;
@@ -123,9 +132,11 @@ impl FerroKv {
             max_version = max_version.max(version);
 
             // Restore TTL tracking for proactive cleanup
-            if let Some(expire_at) = entry.ttl {
-                let key: Arc<[u8]> = entry.key.to_vec().into();
-                expiry_heap.schedule(key, expire_at).await;
+            if !config.read_only {
+                if let Some(expire_at) = entry.ttl {
+                    let key: Arc<[u8]> = entry.key.to_vec().into();
+                    expiry_heap.schedule(key, expire_at).await;
+                }
             }
         }
 
@@ -159,7 +170,7 @@ impl FerroKv {
         }
 
         // Flush recovered data to SSTable before truncating WAL
-        if !recovered_entries.is_empty() {
+        if !config.read_only && !recovered_entries.is_empty() {
             let sst_id = max_sst_id + 1;
             let sst = SSTable::flush(&path, &memtable, 0, sst_id).await?;
             sstables.push(sst);
@@ -189,8 +200,13 @@ impl FerroKv {
             }
         }
 
-        let mut wal = Wal::new(wal_path).await?;
-        wal.truncate().await?;
+        let wal = if config.read_only {
+            Wal::readonly(wal_path).await?
+        } else {
+            let mut wal = Wal::new(wal_path).await?;
+            wal.truncate().await?;
+            wal
+        };
 
         let sstables = Arc::new(ArcSwap::from_pointee(sstables));
         let next_sst_id = Arc::new(AtomicU64::new(max_sst_id + 1));
@@ -207,11 +223,13 @@ impl FerroKv {
         };
 
         // Spawn background expiry cleanup task
-        let memtable = Arc::clone(&memtable);
-        let expiry_heap = Arc::clone(&expiry_heap);
-        tokio::spawn(async move {
-            Self::run_expiry_cleanup(memtable, expiry_heap).await;
-        });
+        if !db.config.read_only {
+            let memtable = Arc::clone(&memtable);
+            let expiry_heap = Arc::clone(&expiry_heap);
+            tokio::spawn(async move {
+                Self::run_expiry_cleanup(memtable, expiry_heap).await;
+            });
+        }
 
         Ok(db)
     }

@@ -15,11 +15,19 @@ pub struct Config {
 
     /// Maximum `SSTable` file size in bytes (default: 4MB)
     pub sstable_size: usize,
+
+    /// Only read files
+    pub read_only: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { memtable_size: 64 * MEBI, l0_compaction_threshold: 4, sstable_size: 4 * MEBI }
+        Self {
+            memtable_size: 64 * MEBI,
+            l0_compaction_threshold: 4,
+            sstable_size: 4 * MEBI,
+            read_only: false,
+        }
     }
 }
 
@@ -127,6 +135,32 @@ impl Builder {
     #[must_use]
     pub fn sstable_size(mut self, size: usize) -> Self {
         self.config.sstable_size = size;
+        self
+    }
+
+    /// Enable read-only mode.
+    ///
+    /// In read-only mode, the database will not create files or directories,
+    /// and will not perform any write operations (flushing, compaction, WAL truncation).
+    /// This is useful for tools that only need to read data without modifying the database.
+    ///
+    /// The database directory and files must already exist.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ferrokv::Builder;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let db = Builder::new().path("./data").read_only().build().await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.config.read_only = true;
         self
     }
 

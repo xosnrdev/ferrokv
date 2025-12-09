@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use clap_cargo::style::CLAP_STYLING;
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{Cell, Color, Table};
-use ferrokv::FerroKv;
+use ferrokv::{Builder, FerroKv};
 
 #[derive(Parser)]
 #[command(about, version, styles = CLAP_STYLING)]
@@ -50,7 +50,10 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let db = FerroKv::with_path(&cli.db)
+    let db = Builder::new()
+        .path(&cli.db)
+        .read_only()
+        .build()
         .await
         .with_context(|| format!("Failed to open database at '{}'", cli.db.display()))?;
 
@@ -77,13 +80,12 @@ async fn handle_scan(
     }
     .context("Failed to execute scan operation")?;
 
-    let limited_pairs: Vec<_> = pairs.into_iter().take(limit).collect();
-
     if count {
-        println!("{}", limited_pairs.len());
+        println!("{}", pairs.len());
         return Ok(());
     }
 
+    let limited_pairs: Vec<_> = pairs.into_iter().take(limit).collect();
     if limited_pairs.is_empty() {
         println!("No keys found in the specified range.");
         return Ok(());
