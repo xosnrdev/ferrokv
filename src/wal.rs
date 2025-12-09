@@ -4,7 +4,7 @@ use bytes::Bytes;
 use crc32fast::Hasher;
 use memmap2::Mmap;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::errors::{FerroError, Result};
 
@@ -77,7 +77,6 @@ impl WalEntry {
 /// Write-Ahead Log (WAL) for durability
 pub struct Wal {
     file: File,
-    path: PathBuf,
     offset: u64,
     write_buf: Vec<u8>,
 }
@@ -85,11 +84,28 @@ pub struct Wal {
 impl Wal {
     /// Create or open a WAL file
     pub async fn new(path: PathBuf) -> Result<Self> {
-        let file = OpenOptions::new().create(true).write(true).append(true).open(&path).await?;
+        // Open in write mode (not append) to allow set_len() on Windows
+        // We'll seek to end before each write to simulate append behavior
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .await?;
 
         let metadata = file.metadata().await?;
         let offset = metadata.len();
-        Ok(Self { file, path, offset, write_buf: Vec::new() })
+        Ok(Self { file, offset, write_buf: Vec::new() })
+    }
+
+    /// Open an existing WAL file in read-only mode
+    pub async fn readonly(path: PathBuf) -> Result<Self> {
+        let file = OpenOptions::new().read(true).open(&path).await?;
+
+        let metadata = file.metadata().await?;
+        let offset = metadata.len();
+        Ok(Self { file, offset, write_buf: Vec::new() })
     }
 
     /// Append an entry to the WAL with durability guarantee
@@ -114,6 +130,8 @@ impl Wal {
         hasher.update(&self.write_buf[4..]);
         self.write_buf[0..4].copy_from_slice(&hasher.finalize().to_le_bytes());
 
+        // Seek to end before write to simulate append mode
+        self.file.seek(std::io::SeekFrom::End(0)).await?;
         self.file.write_all(&self.write_buf).await?;
         self.offset += total_len as u64;
 
@@ -159,6 +177,8 @@ impl Wal {
         }
 
         // Single write + single sync (group commit)
+        // Seek to end before write to simulate append mode
+        self.file.seek(std::io::SeekFrom::End(0)).await?;
         self.file.write_all(&self.write_buf).await?;
         self.offset += total_size as u64;
 
@@ -232,18 +252,14 @@ impl Wal {
 
     /// Truncate WAL (to be called after Memtable flush to `SSTable`)
     pub async fn truncate(&mut self) -> Result<()> {
-        // Close current file
-        drop(std::mem::replace(
-            &mut self.file,
-            OpenOptions::new().write(true).open(&self.path).await?,
-        ));
+        // Truncate file in place without reopening to preserve inode
+        // This keeps the same file descriptor, preventing background tasks
+        // with Arc clones from losing the file reference
+        self.file.set_len(0).await?;
+        self.file.sync_all().await?;
 
-        // Remove old WAL
-        tokio::fs::remove_file(&self.path).await?;
-
-        // Create new empty WAL
-        self.file =
-            OpenOptions::new().create(true).write(true).append(true).open(&self.path).await?;
+        // Reset seek position to beginning after truncation
+        self.file.rewind().await?;
 
         self.offset = 0;
         self.write_buf.clear();
