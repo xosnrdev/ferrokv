@@ -37,7 +37,7 @@ enum Commands {
         limit: usize,
 
         /// Show count of matching keys
-        #[arg(long)]
+        #[arg(long, conflicts_with = "limit")]
         count: bool,
 
         /// Show only keys excluding values
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         .read_only()
         .build()
         .await
-        .with_context(|| format!("Failed to open database at '{}'", cli.db.display()))?;
+        .with_context(|| format!("Failed to open database at `{}`", cli.db.display()))?;
 
     match cli.command {
         Commands::Scan { start, end, limit, count, keys_only } => {
