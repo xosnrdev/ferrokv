@@ -14,7 +14,7 @@ members = [".", "ferrokv-cli"]
 resolver = "3"
 
 [workspace.dependencies]
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 
 [features]
 io-uring = ["tokio/io-uring"]
